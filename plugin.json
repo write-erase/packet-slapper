@@ -1,0 +1,371 @@
+{
+  "name": "Packet Slapper",
+  "version": "1.0.0",
+  "description": "Runs scheduled or on-demand Ookla Speedtests through Dispatcharr to measure speed and latency.",
+  "author": "write-erase",
+  "fields": [
+    {
+      "id": "scheduler_interval",
+      "label": "Scheduler",
+      "type": "select",
+      "default": "off",
+      "help_text": "Runs a Speedtest automatically on the chosen interval, or choose Off to disable. Changes take effect within about 15 seconds of saving. Turning it off allows any test already in progress to finish first.",
+      "options": [
+        {
+          "value": "off",
+          "label": "Off (scheduler disabled)"
+        },
+        {
+          "value": "5",
+          "label": "Every 5 minutes"
+        },
+        {
+          "value": "10",
+          "label": "Every 10 minutes"
+        },
+        {
+          "value": "15",
+          "label": "Every 15 minutes"
+        },
+        {
+          "value": "30",
+          "label": "Every 30 minutes"
+        },
+        {
+          "value": "60",
+          "label": "Every hour"
+        },
+        {
+          "value": "120",
+          "label": "Every 2 hours"
+        },
+        {
+          "value": "180",
+          "label": "Every 3 hours"
+        },
+        {
+          "value": "360",
+          "label": "Every 6 hours"
+        },
+        {
+          "value": "720",
+          "label": "Every 12 hours"
+        },
+        {
+          "value": "1440",
+          "label": "Every 24 hours"
+        }
+      ]
+    },
+    {
+      "id": "skip_if_streaming",
+      "label": "Skip run if channels are streaming",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Speedtests use real bandwidth. Scheduled tests are skipped when Dispatcharr is actively in use."
+    },
+    {
+      "id": "display_timezone",
+      "label": "Timezone",
+      "type": "select",
+      "default": "America/Chicago",
+      "help_text": "Timezone used to format the result timestamp.",
+      "options": [
+        {
+          "value": "UTC",
+          "label": "UTC"
+        },
+        {
+          "value": "America/New_York",
+          "label": "US Eastern - New York"
+        },
+        {
+          "value": "America/Chicago",
+          "label": "US Central - Chicago"
+        },
+        {
+          "value": "America/Denver",
+          "label": "US Mountain - Denver"
+        },
+        {
+          "value": "America/Phoenix",
+          "label": "US Mountain, no DST - Phoenix"
+        },
+        {
+          "value": "America/Los_Angeles",
+          "label": "US Pacific - Los Angeles"
+        },
+        {
+          "value": "America/Anchorage",
+          "label": "US Alaska - Anchorage"
+        },
+        {
+          "value": "Pacific/Honolulu",
+          "label": "US Hawaii - Honolulu"
+        },
+        {
+          "value": "America/Toronto",
+          "label": "Canada Eastern - Toronto"
+        },
+        {
+          "value": "America/Vancouver",
+          "label": "Canada Pacific - Vancouver"
+        },
+        {
+          "value": "America/Halifax",
+          "label": "Canada Atlantic - Halifax"
+        },
+        {
+          "value": "America/Mexico_City",
+          "label": "Mexico City"
+        },
+        {
+          "value": "America/Bogota",
+          "label": "Colombia - Bogota"
+        },
+        {
+          "value": "America/Lima",
+          "label": "Peru - Lima"
+        },
+        {
+          "value": "America/Santiago",
+          "label": "Chile - Santiago"
+        },
+        {
+          "value": "America/Sao_Paulo",
+          "label": "Brazil - Sao Paulo"
+        },
+        {
+          "value": "America/Argentina/Buenos_Aires",
+          "label": "Argentina - Buenos Aires"
+        },
+        {
+          "value": "Europe/London",
+          "label": "UK - London"
+        },
+        {
+          "value": "Europe/Dublin",
+          "label": "Ireland - Dublin"
+        },
+        {
+          "value": "Europe/Lisbon",
+          "label": "Portugal - Lisbon"
+        },
+        {
+          "value": "Europe/Madrid",
+          "label": "Spain - Madrid"
+        },
+        {
+          "value": "Europe/Paris",
+          "label": "France - Paris"
+        },
+        {
+          "value": "Europe/Berlin",
+          "label": "Germany - Berlin"
+        },
+        {
+          "value": "Europe/Amsterdam",
+          "label": "Netherlands - Amsterdam"
+        },
+        {
+          "value": "Europe/Rome",
+          "label": "Italy - Rome"
+        },
+        {
+          "value": "Europe/Zurich",
+          "label": "Switzerland - Zurich"
+        },
+        {
+          "value": "Europe/Athens",
+          "label": "Greece - Athens"
+        },
+        {
+          "value": "Europe/Helsinki",
+          "label": "Finland - Helsinki"
+        },
+        {
+          "value": "Europe/Warsaw",
+          "label": "Poland - Warsaw"
+        },
+        {
+          "value": "Europe/Bucharest",
+          "label": "Romania - Bucharest"
+        },
+        {
+          "value": "Europe/Istanbul",
+          "label": "Turkey - Istanbul"
+        },
+        {
+          "value": "Europe/Moscow",
+          "label": "Russia - Moscow"
+        },
+        {
+          "value": "Africa/Cairo",
+          "label": "Egypt - Cairo"
+        },
+        {
+          "value": "Africa/Johannesburg",
+          "label": "South Africa - Johannesburg"
+        },
+        {
+          "value": "Africa/Lagos",
+          "label": "Nigeria - Lagos"
+        },
+        {
+          "value": "Africa/Nairobi",
+          "label": "Kenya - Nairobi"
+        },
+        {
+          "value": "Asia/Jerusalem",
+          "label": "Israel - Jerusalem"
+        },
+        {
+          "value": "Asia/Dubai",
+          "label": "UAE - Dubai"
+        },
+        {
+          "value": "Asia/Riyadh",
+          "label": "Saudi Arabia - Riyadh"
+        },
+        {
+          "value": "Asia/Karachi",
+          "label": "Pakistan - Karachi"
+        },
+        {
+          "value": "Asia/Kolkata",
+          "label": "India - Kolkata"
+        },
+        {
+          "value": "Asia/Dhaka",
+          "label": "Bangladesh - Dhaka"
+        },
+        {
+          "value": "Asia/Bangkok",
+          "label": "Thailand - Bangkok"
+        },
+        {
+          "value": "Asia/Jakarta",
+          "label": "Indonesia - Jakarta"
+        },
+        {
+          "value": "Asia/Singapore",
+          "label": "Singapore"
+        },
+        {
+          "value": "Asia/Hong_Kong",
+          "label": "Hong Kong"
+        },
+        {
+          "value": "Asia/Shanghai",
+          "label": "China - Shanghai"
+        },
+        {
+          "value": "Asia/Tokyo",
+          "label": "Japan - Tokyo"
+        },
+        {
+          "value": "Asia/Seoul",
+          "label": "South Korea - Seoul"
+        },
+        {
+          "value": "Asia/Manila",
+          "label": "Philippines - Manila"
+        },
+        {
+          "value": "Australia/Perth",
+          "label": "Australia Western - Perth"
+        },
+        {
+          "value": "Australia/Adelaide",
+          "label": "Australia Central - Adelaide"
+        },
+        {
+          "value": "Australia/Brisbane",
+          "label": "Australia Eastern, no DST - Brisbane"
+        },
+        {
+          "value": "Australia/Sydney",
+          "label": "Australia Eastern - Sydney"
+        },
+        {
+          "value": "Pacific/Auckland",
+          "label": "New Zealand - Auckland"
+        }
+      ]
+    },
+    {
+      "id": "discord_webhook_url",
+      "label": "Discord Webhook URL",
+      "type": "string",
+      "input_type": "password",
+      "default": "",
+      "placeholder": "Optional - leave blank to only see results in Dispatcharr.",
+      "help_text": "If configured, each result is posted to Discord via webhook."
+    },
+    {
+      "id": "discord_style",
+      "label": "Discord Message Style",
+      "type": "select",
+      "default": "embed",
+      "options": [
+        {
+          "value": "embed",
+          "label": "Embed (colored card)"
+        },
+        {
+          "value": "plain",
+          "label": "Plain text (classic)"
+        }
+      ],
+      "help_text": "Only used when a Discord webhook URL is configured."
+    },
+    {
+      "id": "server_id",
+      "label": "Speedtest Server ID",
+      "type": "string",
+      "default": "",
+      "placeholder": "Blank = auto-select",
+      "help_text": "Specify an Ookla server by its numeric ID so results are comparable from run to run. Leave blank to let the tool pick the fastest server each time."
+    }
+  ],
+  "actions": [
+    {
+      "id": "run_now",
+      "label": "Run Speedtest Now",
+      "description": "Runs a speed test and returns the results. Results are also sent to Discord if a webhook is configured.",
+      "button_label": "Run Now",
+      "button_variant": "filled",
+      "button_color": "blue"
+    },
+    {
+      "id": "test_webhook",
+      "label": "Send Test Message",
+      "description": "Posts a test message to your Discord webhook (if you set one), without running a speedtest.",
+      "button_label": "Test Webhook",
+      "button_variant": "filled",
+      "button_color": "blue"
+    },
+    {
+      "id": "scheduler_status",
+      "label": "Scheduler Status",
+      "description": "Shows whether the scheduler is running, when it started, when the next test is due, and how the last test went.",
+      "button_label": "Status",
+      "button_variant": "filled",
+      "button_color": "blue"
+    },
+    {
+      "id": "check_streams",
+      "label": "Check Active Streams",
+      "description": "Shows whether anyone is watching (live, VOD or catch-up) and which signals matched. This is what the scheduler checks before skipping a run. Does not run a speedtest.",
+      "button_label": "Check",
+      "button_variant": "filled",
+      "button_color": "blue"
+    },
+    {
+      "id": "section_tips",
+      "label": "💡 Tips",
+      "type": "info",
+      "description": "Click 'Scheduler Status' to see whether the scheduler is running, when the next test is due and how the last one went. 'Run Speedtest Now' does a one-off test."
+    }
+  ]
+}
