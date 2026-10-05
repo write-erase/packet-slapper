@@ -1,6 +1,6 @@
 {
   "name": "Packet Slapper",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Runs scheduled or on-demand Ookla Speedtests through Dispatcharr to measure speed and latency.",
   "author": "write-erase",
   "fields": [
@@ -360,12 +360,6 @@
       "button_label": "Check",
       "button_variant": "filled",
       "button_color": "blue"
-    },
-    {
-      "id": "section_tips",
-      "label": "💡 Tips",
-      "type": "info",
-      "description": "Click 'Scheduler Status' to see whether the scheduler is running, when the next test is due and how the last one went. 'Run Speedtest Now' does a one-off test."
     }
   ]
 }

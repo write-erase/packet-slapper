@@ -31,6 +31,7 @@ _PLUGIN_KEY = os.path.basename(os.path.dirname(os.path.abspath(__file__))).lower
 PLUGIN_DATA_DIR = os.path.join("/data/plugins", _PLUGIN_KEY)
 BIN_DIR = os.path.join(PLUGIN_DATA_DIR, "bin")
 SPEEDTEST_BIN = os.path.join(BIN_DIR, "speedtest")
+SPEEDTEST_VERSION_FILE = os.path.join(BIN_DIR, "speedtest.version")
 SPEEDTEST_CLI_VERSION = "1.2.0"  # bump if Ookla ships a newer CLI release
 SPEEDTEST_TIMEOUT = 90  # seconds
 
@@ -60,6 +61,7 @@ _LEADER_TTL = 240       # seconds; longer than the slowest speedtest so the leas
 _STATE_TTL = 300
 _RUN_TTL = 240
 _TICK_SECONDS = 5
+_BUSY_RETRY_SECONDS = 60  # retry delay when a scheduled run finds another test in progress
 _STARTUP_DELAY = 10     # let Dispatcharr finish starting before the first DB read
 
 
@@ -76,9 +78,21 @@ def _arch_suffix():
     raise RuntimeError(f"Unsupported architecture for Ookla speedtest CLI: {machine}")
 
 
+def _installed_cli_version():
+    try:
+        with open(SPEEDTEST_VERSION_FILE) as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
 def _ensure_speedtest_binary(logger):
-    """Download the official Ookla speedtest CLI into plugin data dir if missing."""
-    if os.path.isfile(SPEEDTEST_BIN) and os.access(SPEEDTEST_BIN, os.X_OK):
+    """Download the official Ookla speedtest CLI into plugin data dir if missing or outdated."""
+    if (
+        os.path.isfile(SPEEDTEST_BIN)
+        and os.access(SPEEDTEST_BIN, os.X_OK)
+        and _installed_cli_version() == SPEEDTEST_CLI_VERSION
+    ):
         return SPEEDTEST_BIN
 
     os.makedirs(BIN_DIR, exist_ok=True)
@@ -89,6 +103,7 @@ def _ensure_speedtest_binary(logger):
     )
     logger.info(f"Packet Slapper: downloading Ookla CLI from {url}")
 
+    staged = SPEEDTEST_BIN + ".new"
     try:
         with tempfile.TemporaryDirectory() as tmp:
             tgz_path = os.path.join(tmp, "speedtest.tgz")
@@ -99,12 +114,21 @@ def _ensure_speedtest_binary(logger):
                     tf.extract("speedtest", tmp, filter="data")
                 except TypeError:  # Python < 3.12 has no extraction filters
                     tf.extract("speedtest", tmp)
-            shutil.move(os.path.join(tmp, "speedtest"), SPEEDTEST_BIN)
+            # Copy into the bin dir under a temp name, then swap it in, so an
+            # interrupted install never leaves a half-written executable behind.
+            shutil.copyfile(os.path.join(tmp, "speedtest"), staged)
+        os.chmod(staged, 0o755)
+        os.replace(staged, SPEEDTEST_BIN)
+        with open(SPEEDTEST_VERSION_FILE + ".new", "w") as fh:
+            fh.write(SPEEDTEST_CLI_VERSION)
+        os.replace(SPEEDTEST_VERSION_FILE + ".new", SPEEDTEST_VERSION_FILE)
     except Exception as exc:
+        try:
+            os.remove(staged)
+        except OSError:
+            pass
         raise RuntimeError(f"Could not download the Ookla speedtest CLI ({exc}). Check that Dispatcharr can reach install.speedtest.net.") from exc
 
-    st = os.stat(SPEEDTEST_BIN)
-    os.chmod(SPEEDTEST_BIN, st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     return SPEEDTEST_BIN
 
 
@@ -181,7 +205,7 @@ def _clean_server_id(raw):
     value = str(raw or "").strip()
     if not value:
         return ""
-    if not value.isdigit():
+    if not (value.isascii() and value.isdigit()):
         raise RuntimeError(f"Server ID must be a number (got '{value}'). Leave it blank to auto-select.")
     return value
 
@@ -191,6 +215,11 @@ def _num(value, default=0.0):
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _fmt_loss(value, sep=""):
+    """Packet loss for display; the CLI leaves it out for some servers."""
+    return "N/A" if value is None else f"{value:g}{sep}%"
 
 
 def _clip(text, limit):
@@ -222,12 +251,13 @@ def _summarize_result(result, tz_name):
                     pass  # unknown timezone name: keep showing UTC
 
     ping = result.get("ping") or {}
+    loss_raw = result.get("packetLoss")
     return {
         "download_mbps": round(_num((result.get("download") or {}).get("bandwidth")) / 125000, 2),
         "upload_mbps": round(_num((result.get("upload") or {}).get("bandwidth")) / 125000, 2),
         "latency_ms": round(_num(ping.get("latency")), 2),
         "jitter_ms": round(_num(ping.get("jitter")), 2),
-        "packet_loss": round(_num(result.get("packetLoss")), 1),
+        "packet_loss": round(_num(loss_raw), 1) if loss_raw is not None else None,
         "isp": result.get("isp") or "Unknown ISP",
         "server_name": server.get("name") or "Unknown Server",
         "server_location": server.get("location") or "Unknown Location",
@@ -249,7 +279,7 @@ def _format_ui_message(s):
         f"\u2b07 {s['download_mbps']} Mbps",
         f"\u2b06 {s['upload_mbps']} Mbps",
         f"Ping {s['latency_ms']} ms (jitter {s['jitter_ms']} ms)",
-        f"Loss {s['packet_loss']:g}%",
+        f"Loss {_fmt_loss(s['packet_loss'])}",
         f"{s['server_name']}, {s['server_location']}",
         f"ISP: {s['isp']}",
     ]
@@ -274,7 +304,7 @@ def _format_discord_message(s):
         f"> Latency: `{s['latency_ms']} ms` (Jitter: {s['jitter_ms']} ms)",
         f"> Download: `{s['download_mbps']} Mbps`",
         f"> Upload: `{s['upload_mbps']} Mbps`",
-        f"> Packet Loss: `{s['packet_loss']:g} %`",
+        f"> Packet Loss: `{_fmt_loss(s['packet_loss'], ' ')}`",
     ]
     if s["distance"] != "N/A":
         lines.append(f"> Distance: {s['distance']}")
@@ -291,12 +321,12 @@ def _discord_embed(s):
             "title": "Packet Slapper Speedtest",
             "color": 0x2ECC71,
             "fields": [
-                {"name": "\u2b07 Download", "value": f"**{s['download_mbps']}** Mbps", "inline": False},
-                {"name": "\u2b06 Upload", "value": f"**{s['upload_mbps']}** Mbps", "inline": False},
-                {"name": "\U0001f3d3 Latency", "value": f"**{s['latency_ms']}** ms\nJitter {s['jitter_ms']} ms", "inline": False},
-                {"name": "\U0001f4c9 Packet loss", "value": f"{s['packet_loss']:g} %", "inline": False},
-                {"name": "\U0001f4cd Server", "value": "\n".join(server_lines), "inline": False},
-                {"name": "\U0001f310 ISP", "value": _clip(s["isp"], 200), "inline": False},
+                {"name": "\u2b07 Download", "value": f"**{s['download_mbps']}** Mbps", "inline": True},
+                {"name": "\u2b06 Upload", "value": f"**{s['upload_mbps']}** Mbps", "inline": True},
+                {"name": "\U0001f3d3 Latency", "value": f"**{s['latency_ms']}** ms\nJitter {s['jitter_ms']} ms", "inline": True},
+                {"name": "\U0001f4c9 Packet loss", "value": _fmt_loss(s['packet_loss'], ' '), "inline": True},
+                {"name": "\U0001f4cd Server", "value": "\n".join(server_lines), "inline": True},
+                {"name": "\U0001f310 ISP", "value": _clip(s["isp"], 200), "inline": True},
             ],
             "footer": {"text": _clip(s["time_display"], 200)},
         }]
@@ -309,7 +339,7 @@ def _discord_result_payload(s, style):
 
 def _discord_error_payload(message, style):
     if style == "plain":
-        return f"\u274c Speedtest failed: {message}"
+        return f"\u274c Speedtest failed: {_clip(message, 1900)}"
     return {"embeds": [{"title": "\u274c Speedtest failed", "description": _clip(message, 1500), "color": 0xE74C3C}]}
 
 
@@ -759,11 +789,14 @@ def _scheduler_tick(client, settings, logger, holding):
     if not next_at or next_at <= now:
         _state["next_run_at"] = None  # shows "test in progress"
         _publish_state(client)
+        outcome = None
         try:
-            _do_one_run(settings, logger, manual=False)
+            outcome = _do_one_run(settings, logger, manual=False)
         except Exception:
             logger.exception("Packet Slapper: unhandled error in scheduled run")
-        _state["next_run_at"] = time.time() + interval_seconds
+        busy = isinstance(outcome, dict) and outcome.get("status") == "busy"
+        delay = min(_BUSY_RETRY_SECONDS, interval_seconds) if busy else interval_seconds
+        _state["next_run_at"] = time.time() + delay
 
     _publish_state(client)
     return True
@@ -790,6 +823,11 @@ def _controller_loop():
                             "using the settings from the last button click instead"
                         )
                         warned = True
+                    if not _last_settings:
+                        # No saved settings and no button click to fall back on:
+                        # wait for the DB rather than guess what the user wants.
+                        _controller_stop.wait(_TICK_SECONDS)
+                        continue
                     plugin_enabled, settings = True, dict(_last_settings)
                 else:
                     plugin_enabled, settings = snapshot
@@ -919,7 +957,7 @@ def _describe_scheduler(settings, logger):
 
 class Plugin:
     name = "Packet Slapper"
-    version = "1.0.0"
+    version = "1.0.1"
     description = "Periodic/on-demand speedtests shown in Dispatcharr and optionally posted to Discord, run through Dispatcharr's own network."
 
     fields = []  # defined in plugin.json; kept here only if you drop the manifest
@@ -960,5 +998,6 @@ class Plugin:
         """Called when the plugin is disabled, deleted, or reloaded."""
         logger = context.get("logger") or logging.getLogger("plugins.packet_slapper")
         _controller_stop.set()
+        _last_settings.clear()  # a disabled plugin shouldn't keep a settings fallback
         _release_leadership(_get_redis_client(logger), logger)
         logger.info("Packet Slapper: stop() called, scheduler signaled to exit")
