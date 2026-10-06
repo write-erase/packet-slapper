@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.2
+
+- Changed to a new logo.
+
 ## 1.0.1
 
 Bug fixes from a read-through of 1.0.0.
