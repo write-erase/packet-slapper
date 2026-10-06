@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.3
+
+- Fixed an issue where the plugin in Dispatcharr still showed version 1.0.1.
+
 ## 1.0.2
 
 - Changed to a new logo.
