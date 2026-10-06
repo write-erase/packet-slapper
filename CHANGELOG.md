@@ -10,6 +10,8 @@ Bug fixes from a read-through of 1.0.0.
 - Server ID only accepts 0-9. `str.isdigit()` lets things like superscript digits through.
 - The speedtest CLI gets re-downloaded when `SPEEDTEST_CLI_VERSION` changes. The installed version is saved in `bin/speedtest.version`. Upgrading from 1.0.0 does one fresh download since there's no version file yet.
 - The CLI is written to a temp file in `bin/` and swapped in with `os.replace`, so a download that dies partway can't leave a broken `speedtest` that passes the executable check forever.
+- The downloaded CLI is created with mode 0700 instead of being chmod'd to 0755 afterwards, so it isn't world-readable or executable. This was the CodeQL `py/overly-permissive-file` alert.
+- The speedtest CLI is read out of the tarball with `extractfile` instead of `extract`, and anything that isn't a regular file named `speedtest` is rejected. This was the CodeQL tarfile extraction alert, and it also drops the fallback for Pythons without extraction filters.
 - If the settings can't be read from the DB and nobody has clicked a button yet, the scheduler waits and tries again instead of assuming it's enabled. `stop()` also clears the cached settings.
 - A scheduled run that finds another test already running retries after 60 seconds. Before, it waited a full interval, which on a 24 hour schedule means a lost day.
 - Removed the Tips entry from `actions` in plugin.json. It isn't an action, so it showed up as a button that did nothing but return "Unknown action". The Scheduler Status and Run Now descriptions already say the same thing.

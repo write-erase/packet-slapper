@@ -109,15 +109,25 @@ def _ensure_speedtest_binary(logger):
             tgz_path = os.path.join(tmp, "speedtest.tgz")
             with urllib.request.urlopen(url, timeout=60) as resp, open(tgz_path, "wb") as out:  # noqa: S310 - fixed Ookla CDN URL
                 shutil.copyfileobj(resp, out)
+            # Read the one member we need straight out of the archive instead of
+            # extracting to disk, so nothing in the tarball can pick its own path.
+            # It lands in the bin dir under a temp name and is swapped in below,
+            # so an interrupted install never leaves a half-written executable.
             with tarfile.open(tgz_path) as tf:
+                member = tf.getmember("speedtest")
+                if not member.isfile():
+                    raise RuntimeError("'speedtest' in the archive is not a regular file")
+                src = tf.extractfile(member)
+                if src is None:
+                    raise RuntimeError("could not read 'speedtest' from the archive")
                 try:
-                    tf.extract("speedtest", tmp, filter="data")
-                except TypeError:  # Python < 3.12 has no extraction filters
-                    tf.extract("speedtest", tmp)
-            # Copy into the bin dir under a temp name, then swap it in, so an
-            # interrupted install never leaves a half-written executable behind.
-            shutil.copyfile(os.path.join(tmp, "speedtest"), staged)
-        os.chmod(staged, 0o755)
+                    os.remove(staged)  # clear any leftover from an interrupted install
+                except OSError:
+                    pass
+                # Owner-only: only the user Dispatcharr runs as needs to execute it.
+                fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+                with src, os.fdopen(fd, "wb") as out:
+                    shutil.copyfileobj(src, out)
         os.replace(staged, SPEEDTEST_BIN)
         with open(SPEEDTEST_VERSION_FILE + ".new", "w") as fh:
             fh.write(SPEEDTEST_CLI_VERSION)
