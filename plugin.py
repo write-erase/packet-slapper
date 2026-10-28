@@ -65,6 +65,10 @@ _STATE_KEY = "packet_slapper:scheduler:state"
 _LAST_RUN_KEY = "packet_slapper:last_run"
 _LAST_SKIP_KEY = "packet_slapper:last_skip"   # current streak of runs skipped because someone was watching
 _RUNNING_KEY = "packet_slapper:running"   # guards against two speedtests at once
+# Latest result for Prometheus, read by the Dispatcharr Exporter plugin. No TTL, so the
+# last value survives restarts; the exporter turns the timestamps into staleness alerts.
+_METRICS_KEY = "packet_slapper:prometheus:latest"
+_METRICS_ATTEMPTS = 3
 _LEADER_TTL = 240       # seconds; longer than the slowest speedtest so the lease isn't lost mid-run
 _STATE_TTL = 300
 _RUN_TTL = 240
@@ -688,6 +692,7 @@ def _execute_run(settings, logger, manual=False):
     tz_name = str(settings.get("display_timezone") or _DEFAULT_TIMEZONE).strip()
     webhook_url = str(settings.get("discord_webhook_url") or "").strip()
     style = _discord_style(settings)
+    prometheus = bool(settings.get("prometheus_enabled", False))
 
     try:
         server_id = _clean_server_id(settings.get("server_id"))
@@ -696,6 +701,8 @@ def _execute_run(settings, logger, manual=False):
     except Exception as exc:
         logger.error(f"Packet Slapper: speedtest failed: {exc}", exc_info=not isinstance(exc, RuntimeError))
         _post_to_discord(webhook_url, _discord_error_payload(str(exc), style), logger)
+        if prometheus:
+            _publish_metrics(logger, ok=False)
         return {"status": "error", "message": f"\u274c Speedtest failed: {exc}"}
 
     ui_message = _format_ui_message(summary)
@@ -706,6 +713,11 @@ def _execute_run(settings, logger, manual=False):
         ui_message += " | Posted to Discord"
     elif posted is False:
         ui_message += " | Discord post FAILED (see logs)"
+
+    if prometheus and not _publish_metrics(logger, ok=True, summary=summary):
+        # The test itself worked, so this isn't retried early: that would spend bandwidth on a
+        # new test every minute for as long as Redis is down.
+        return {"status": "publish_error", "message": ui_message + " | Prometheus metrics update FAILED (see logs)", "result": summary}
 
     # "message" is what Dispatcharr shows in the popup; "result" carries the raw numbers.
     return {"status": "ok", "message": ui_message, "result": summary}
@@ -783,9 +795,11 @@ def _record_last_run(logger, outcome, manual):
         _local_last_skip.update(record)
         _redis_set(client, _LAST_SKIP_KEY, json.dumps(record))  # no TTL: survives a stop
         return
-    if status == "ok":
+    if status in ("ok", "publish_error"):
         r = outcome.get("result") or {}
         detail = f"{r.get('download_mbps')} Mbps down / {r.get('upload_mbps')} Mbps up"
+        if status == "publish_error":
+            detail += " (Prometheus metrics NOT updated)"
     else:
         detail = str(outcome.get("message", ""))[:120]
     record = {"at": time.time(), "status": status, "manual": bool(manual), "detail": detail}
@@ -829,6 +843,47 @@ def _redis_get_json(client, key):
         return json.loads(_s(raw)) if raw else None
     except Exception:
         return None
+
+
+def _publish_metrics(logger, ok, summary=None):
+    """Write this run to the key the Dispatcharr Exporter reads. Returns True once Redis confirms it.
+
+    A failed run only updates the attempt fields, so the last good numbers stay visible
+    next to last_attempt_success=0. Retries a couple of times, since the scheduler thread
+    is long-lived and its pooled connection can go stale.
+    """
+    for attempt in range(1, _METRICS_ATTEMPTS + 1):
+        try:
+            client = _get_redis_client(logger)  # fresh lookup each attempt
+            if client is None:
+                raise RuntimeError("Redis is unavailable")
+            raw = client.get(_METRICS_KEY)  # not _redis_get_json: a failed read must not wipe the last result
+            try:
+                state = json.loads(_s(raw)) if raw else {}
+            except ValueError:
+                state = {}  # unreadable leftover: start over rather than fail every run
+            if not isinstance(state, dict):
+                state = {}
+            now = time.time()
+            state["last_attempt_timestamp_seconds"] = now
+            state["last_attempt_success"] = 1 if ok else 0
+            if ok and summary is not None:
+                state["last_success_timestamp_seconds"] = now
+                state["result"] = summary
+            try:
+                payload = json.dumps(state, allow_nan=False)
+            except ValueError as exc:  # bad data, retrying can't fix it
+                logger.warning(f"Packet Slapper: Prometheus metrics not published, result is not JSON-safe: {exc}")
+                return False
+            client.set(_METRICS_KEY, payload)
+            if _redis_get_json(client, _METRICS_KEY) != state:
+                raise RuntimeError("read-back did not match what was written")
+            return True
+        except Exception as exc:
+            logger.warning(f"Packet Slapper: could not publish Prometheus metrics (attempt {attempt}/{_METRICS_ATTEMPTS}): {exc}")
+            if attempt < _METRICS_ATTEMPTS:
+                time.sleep(1)
+    return False
 
 
 def _publish_state(client):
@@ -1066,7 +1121,7 @@ def _fmt_duration(seconds):
     return f"{seconds}s"
 
 
-_LAST_RUN_ICONS = {"ok": "\u2705", "skipped": "\u23ed", "error": "\u274c"}
+_LAST_RUN_ICONS = {"ok": "\u2705", "skipped": "\u23ed", "error": "\u274c", "publish_error": "\u26a0"}
 
 
 def _describe_scheduler(settings, logger):
@@ -1122,8 +1177,8 @@ def _describe_scheduler(settings, logger):
 
 class Plugin:
     name = "Packet Slapper"
-    version = "1.0.4"
-    description = "Periodic/on-demand speedtests shown in Dispatcharr and optionally posted to Discord, run through Dispatcharr's own network."
+    version = "1.1.0"
+    description = "Periodic/on-demand speedtests shown in Dispatcharr, optionally posted to Discord and exported to Prometheus, run through Dispatcharr's own network."
 
     fields = []  # defined in plugin.json; kept here only if you drop the manifest
 

@@ -1,7 +1,7 @@
 {
   "name": "Packet Slapper",
-  "version": "1.0.4",
-  "description": "Runs scheduled or on-demand Ookla Speedtests through Dispatcharr to measure speed and latency.",
+  "version": "1.1.0",
+  "description": "Runs scheduled or on-demand Ookla Speedtests through Dispatcharr to measure speed and latency, with optional Discord posts and Prometheus metrics.",
   "author": "write-erase",
   "fields": [
     {
@@ -326,6 +326,13 @@
       "default": "",
       "placeholder": "Blank = auto-select",
       "help_text": "Specify an Ookla server by its numeric ID so results are comparable from run to run. Leave blank to let the tool pick the fastest server each time."
+    },
+    {
+      "id": "prometheus_enabled",
+      "label": "Publish results for Prometheus",
+      "type": "boolean",
+      "default": false,
+      "help_text": "Saves each result in Redis for the Dispatcharr Exporter plugin to serve as dispatcharr_speedtest_* metrics. Only needed if you scrape Dispatcharr with Prometheus."
     }
   ],
   "actions": [
