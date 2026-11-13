@@ -1,6 +1,6 @@
 {
   "name": "Packet Slapper",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Runs scheduled or on-demand Ookla Speedtests through Dispatcharr to measure speed and latency, with optional Discord posts and Prometheus metrics.",
   "author": "write-erase",
   "fields": [
@@ -326,6 +326,13 @@
       "default": "",
       "placeholder": "Blank = auto-select",
       "help_text": "Specify an Ookla server by its numeric ID so results are comparable from run to run. Leave blank to let the tool pick the fastest server each time."
+    },
+    {
+      "id": "cli_auto_update",
+      "label": "Keep the Speedtest CLI up to date",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Checks Ookla's download server for a newer speedtest CLI at most once a day and installs it after a startup test. Turn off to stay on the version you have (a missing CLI is still downloaded)."
     },
     {
       "id": "prometheus_enabled",
