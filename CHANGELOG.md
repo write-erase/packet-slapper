@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.1.1
+
+- Fixed the scheduler sometimes stopping for good after Dispatcharr reloaded the plugin. Dispatcharr stops and recreates plugins during a plugin discovery pass, which happens for example when the Plugins page is opened. If that happened while a scheduled speedtest was running, the new scheduler gave up after waiting 3 seconds for the old one, and no more scheduled tests ran until a button was clicked or Dispatcharr restarted. Status kept saying "RUNNING" for a few minutes in the meantime. Now each scheduler has its own stop flag, so the new one starts right away. The old one finishes its test, then hands over the schedule, and the new one carries on from it without testing again straight away.
+- `stop()` no longer clears the scheduler lease and schedule out from under a test that's still running. The scheduler releases them itself when it exits.
+- The scheduler lease and the "a test is running" slot are now renewed every 30 seconds while a test runs. Before, a slow CLI download plus a slow test could outlast both (4 minutes), letting a second worker start a second speedtest at the same time. Renewing and releasing them now checks ownership atomically, so one worker can never remove another's.
+- The speedtest CLI is now installed, and checked for updates, in the background shortly after Dispatcharr starts, so the first Run Now after a restart no longer waits on a download. Only one worker does it.
+- The CLI update check now runs at most once a day, shared by all workers, instead of once per worker every time Dispatcharr starts.
+- New "Keep the Speedtest CLI up to date" setting (on by default). Turn it off to stay on the CLI you have; a missing CLI is still downloaded.
+- Run Now still runs while someone is watching, but the result now says so, since the numbers will be lower and the viewer may have seen buffering.
+- Prometheus: a scheduled run skipped because someone was watching now sets `last_skip_timestamp_seconds`, so staleness alerts can tell "busy" from "broken".
+- Check Active Streams no longer lists up to 60 Redis keys in the log at INFO level. That list is now only logged with debug logging on.
+- The plugin's name, version and description are now read from `plugin.json`, so they can't drift apart (the cause of the 1.0.3 fix).
+- The User-Agent sent to Ookla and Discord now carries the real plugin version.
+- Added a test suite (`tests/`) and a GitHub Actions workflow that runs it with a lint check on every push and pull request.
+
 ## 1.1.0
 
 - New "Publish results for Prometheus" setting (off by default). When it's on, every speedtest is saved to the Redis key `packet_slapper:prometheus:latest`, which the Dispatcharr Exporter plugin serves as `dispatcharr_speedtest_*` metrics. This requires an exporter release that includes the Packet Slapper integration, and its Packet Slapper setting turned on there too. Scheduled and Run Now tests both publish. A failed test records the failed attempt but keeps the last good result. Runs skipped because someone is watching are not published. Discord posting is unchanged and works alongside it.
