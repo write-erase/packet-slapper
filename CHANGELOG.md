@@ -4,6 +4,11 @@
 
 - The speedtest CLI is now kept in a `.packet_slapper` folder next to the plugin's folder instead of inside it. Dispatcharr replaces the plugin folder on every update, so until now each update deleted the CLI and it had to be downloaded again. After this update it is downloaded one last time, then kept across updates.
 - The plugin no longer assumes Dispatcharr's plugins live in `/data/plugins`. It uses the folder Dispatcharr actually installed it into, so setups that move the plugins directory with `DISPATCHARR_PLUGINS_DIR` now find the CLI too.
+- Each result now shows the exit IP, the public address the test went out through, so you can confirm the VPN was in use. It's shown as "Source" in the Run Now popup and on Status's last-run line ("Source: 203.0.113.45").
+- New "Include exit IP in Discord posts" setting (off by default). When on, the IP appears under the ISP in the embed, or next to the ISP in plain-text posts.
+- Results now link to their page on speedtest.net: the Discord embed's title is the link, plain-text posts get a "Result:" line, and the Dispatcharr log line ends with the URL.
+- The Run Now popup is shorter, because it doesn't grow to fit and long results were cut off. It now reads `⬇ … | ⬆ … | Ping … | Loss … | Jitter … | Host: <server location> | Source: <exit IP>`, followed by "⚠ N active sessions" if someone was watching and "Discord ✓" or "Discord ✗ (see log)" when a webhook is set. Server name, ISP, distance, time and the result link stay in the Discord post and in the full line written to Dispatcharr's log for every run.
+- The exit IP is not included in the Prometheus metrics key.
 
 ## 1.1.1
 

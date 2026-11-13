@@ -432,6 +432,10 @@ def _summarize_result(result, tz_name):
 
     ping = result.get("ping") or {}
     loss_raw = result.get("packetLoss")
+    exit_ip = str((result.get("interface") or {}).get("externalIp") or "").strip() or None
+    result_url = str((result.get("result") or {}).get("url") or "").strip()
+    if not result_url.startswith("https://"):
+        result_url = None  # only ever link to a real https result page
     return {
         "download_mbps": round(_num((result.get("download") or {}).get("bandwidth")) / 125000, 2),
         "upload_mbps": round(_num((result.get("upload") or {}).get("bandwidth")) / 125000, 2),
@@ -446,14 +450,38 @@ def _summarize_result(result, tz_name):
         "distance": f"{distance} km" if distance is not None else "N/A",
         "time_display": time_display,
         "time_local": time_local,
+        # The public IP the test went out through: shows whether the VPN was in use.
+        "exit_ip": exit_ip,
+        # The result's page on speedtest.net (the CLI shares results by default).
+        "result_url": result_url,
     }
 
 
-def _format_ui_message(s):
-    """Single-line summary for the Dispatcharr notification popup.
+def _format_popup_message(s):
+    """Short one-line summary for the Dispatcharr notification popup.
 
-    Dispatcharr's popup collapses line breaks into spaces, so fields are
-    separated with ' | ' and the numbers you care about come first.
+    The popup doesn't grow to fit, so it only carries what you need at a glance;
+    the full details are in the Discord post and in the log line from
+    _format_ui_message.
+    """
+    parts = [
+        f"\u2b07 {s['download_mbps']} Mbps",
+        f"\u2b06 {s['upload_mbps']} Mbps",
+        f"Ping {s['latency_ms']} ms",
+        f"Loss {_fmt_loss(s['packet_loss'])}",
+        f"Jitter {s['jitter_ms']} ms",
+    ]
+    if s.get("server_location") and s["server_location"] != "Unknown Location":
+        parts.append(f"Host: {s['server_location']}")
+    if s.get("exit_ip"):
+        parts.append(f"Source: {s['exit_ip']}")  # the public IP the test went out through
+    return " | ".join(parts)
+
+
+def _format_ui_message(s):
+    """Full one-line summary, written to the Dispatcharr log for every run.
+
+    Fields are separated with ' | ' and the numbers you care about come first.
     """
     parts = [
         f"\u2b07 {s['download_mbps']} Mbps",
@@ -463,9 +491,13 @@ def _format_ui_message(s):
         f"{s['server_name']}, {s['server_location']}",
         f"ISP: {s['isp']}",
     ]
+    if s.get("exit_ip"):
+        parts.append(f"Exit IP {s['exit_ip']}")
     if s["distance"] != "N/A":
         parts.append(s["distance"])
     parts.append(s["time_local"])
+    if s.get("result_url"):
+        parts.append(s["result_url"])
     return " | ".join(parts)
 
 
@@ -473,13 +505,13 @@ def _discord_style(settings):
     return "plain" if str(settings.get("discord_style") or "embed").lower() == "plain" else "embed"
 
 
-def _format_discord_message(s):
+def _format_discord_message(s, include_ip=False):
     """Classic plain-text Discord message."""
     lines = [
         "**Packet Slapper Speedtest**",
         f"> Server: {s['server_name']} ({s['server_location']}, {s['server_country']})",
         f"> Host: {s['server_host']}",
-        f"> ISP: {s['isp']}",
+        f"> ISP: {s['isp']}" + (f" (`{s['exit_ip']}`)" if include_ip and s.get("exit_ip") else ""),
         f"> Time: {s['time_display']}",
         f"> Latency: `{s['latency_ms']} ms` (Jitter: {s['jitter_ms']} ms)",
         f"> Download: `{s['download_mbps']} Mbps`",
@@ -488,33 +520,43 @@ def _format_discord_message(s):
     ]
     if s["distance"] != "N/A":
         lines.append(f"> Distance: {s['distance']}")
+    if s.get("result_url"):
+        lines.append(f"> Result: <{s['result_url']}>")  # <...> stops Discord adding a preview card
     return "\n".join(lines)
 
 
-def _discord_embed(s):
+def _discord_embed(s, include_ip=False):
     """Discord embed: speeds and latency on the first row, loss/server/ISP on the second."""
     server_lines = [_clip(s["server_name"], 100), _clip(f"{s['server_location']}, {s['server_country']}", 100), f"`{_clip(s['server_host'], 100)}`"]
     if s["distance"] != "N/A":
         server_lines.append(s["distance"])
-    return {
-        "embeds": [{
-            "title": "Packet Slapper Speedtest",
-            "color": 0x2ECC71,
-            "fields": [
-                {"name": "\u2b07 Download", "value": f"**{s['download_mbps']}** Mbps", "inline": True},
-                {"name": "\u2b06 Upload", "value": f"**{s['upload_mbps']}** Mbps", "inline": True},
-                {"name": "\U0001f3d3 Latency", "value": f"**{s['latency_ms']}** ms\nJitter {s['jitter_ms']} ms", "inline": True},
-                {"name": "\U0001f4c9 Packet loss", "value": _fmt_loss(s['packet_loss'], ' '), "inline": True},
-                {"name": "\U0001f4cd Server", "value": "\n".join(server_lines), "inline": True},
-                {"name": "\U0001f310 ISP", "value": _clip(s["isp"], 200), "inline": True},
-            ],
-            "footer": {"text": _clip(s["time_display"], 200)},
-        }]
+    isp = _clip(s["isp"], 200)
+    if include_ip and s.get("exit_ip"):
+        isp += f"\n`{_clip(s['exit_ip'], 60)}`"  # under the ISP, so the card stays two rows
+    embed = {
+        "title": "Packet Slapper Speedtest",
+        "color": 0x2ECC71,
+        "fields": [
+            {"name": "\u2b07 Download", "value": f"**{s['download_mbps']}** Mbps", "inline": True},
+            {"name": "\u2b06 Upload", "value": f"**{s['upload_mbps']}** Mbps", "inline": True},
+            {"name": "\U0001f3d3 Latency", "value": f"**{s['latency_ms']}** ms\nJitter {s['jitter_ms']} ms", "inline": True},
+            {"name": "\U0001f4c9 Packet loss", "value": _fmt_loss(s['packet_loss'], ' '), "inline": True},
+            {"name": "\U0001f4cd Server", "value": "\n".join(server_lines), "inline": True},
+            {"name": "\U0001f310 ISP", "value": isp, "inline": True},
+        ],
+        "footer": {"text": _clip(s["time_display"], 200)},
     }
+    if s.get("result_url"):
+        embed["url"] = s["result_url"]  # makes the title a link to the result page
+    return {"embeds": [embed]}
 
 
-def _discord_result_payload(s, style):
-    return _format_discord_message(s) if style == "plain" else _discord_embed(s)
+def _discord_include_ip(settings):
+    return bool(settings.get("discord_include_exit_ip", False))
+
+
+def _discord_result_payload(s, style, include_ip=False):
+    return _format_discord_message(s, include_ip) if style == "plain" else _discord_embed(s, include_ip)
 
 
 def _discord_error_payload(message, style):
@@ -776,8 +818,8 @@ def _execute_run(settings, logger, manual=False):
             activity = None
         if activity and any(activity.values()):
             n = _viewer_count(activity)
-            who = f"{n} viewer session{'s' if n != 1 else ''}" if n else "provider connections"
-            watching_note = f" | \u26a0 {who} active during this test, so results may be low and playback may have stuttered"
+            who = f"{n} active session{'s' if n != 1 else ''}" if n else "active provider connections"
+            watching_note = f" | \u26a0 {who}"
 
     tz_name = str(settings.get("display_timezone") or _DEFAULT_TIMEZONE).strip()
     webhook_url = str(settings.get("discord_webhook_url") or "").strip()
@@ -794,20 +836,22 @@ def _execute_run(settings, logger, manual=False):
             _publish_metrics(logger, ok=False)
         return {"status": "error", "message": f"\u274c Speedtest failed: {exc}"}
 
-    ui_message = _format_ui_message(summary)
-    logger.info(f"Packet Slapper: {ui_message}")  # scheduled runs land in the log too
-    ui_message += watching_note
+    log_line = _format_ui_message(summary)
+    if watching_note:
+        log_line += f"{watching_note} during this test, so results may be low and playback may have stuttered"
+    logger.info(f"Packet Slapper: {log_line}")  # every run, scheduled or not, lands in the log
+    ui_message = _format_popup_message(summary) + watching_note
 
-    posted = _post_to_discord(webhook_url, _discord_result_payload(summary, style), logger)
+    posted = _post_to_discord(webhook_url, _discord_result_payload(summary, style, _discord_include_ip(settings)), logger)
     if posted is True:
-        ui_message += " | Posted to Discord"
+        ui_message += " | Discord \u2713"
     elif posted is False:
-        ui_message += " | Discord post FAILED (see logs)"
+        ui_message += " | Discord \u2717 (see log)"
 
     if prometheus and not _publish_metrics(logger, ok=True, summary=summary):
         # The test itself worked, so this isn't retried early: that would spend bandwidth on a
         # new test every minute for as long as Redis is down.
-        return {"status": "publish_error", "message": ui_message + " | Prometheus metrics update FAILED (see logs)", "result": summary}
+        return {"status": "publish_error", "message": ui_message + " | Prometheus \u2717 (see log)", "result": summary}
 
     # "message" is what Dispatcharr shows in the popup; "result" carries the raw numbers.
     return {"status": "ok", "message": ui_message, "result": summary}
@@ -967,6 +1011,8 @@ def _record_last_run(logger, outcome, manual):
     if status in ("ok", "publish_error"):
         r = outcome.get("result") or {}
         detail = f"{r.get('download_mbps')} Mbps down / {r.get('upload_mbps')} Mbps up"
+        if r.get("exit_ip"):
+            detail += f" (Source: {r['exit_ip']})"
         if status == "publish_error":
             detail += " (Prometheus metrics NOT updated)"
     else:
@@ -1038,7 +1084,9 @@ def _publish_metrics(logger, ok, summary=None):
             state["last_attempt_success"] = 1 if ok else 0
             if ok and summary is not None:
                 state["last_success_timestamp_seconds"] = now
-                state["result"] = summary
+                # The exit IP stays out of the metrics key: Prometheus data tends to travel
+                # further (Grafana, shared dashboards) than the Dispatcharr UI does.
+                state["result"] = {k: v for k, v in summary.items() if k != "exit_ip"}
             try:
                 payload = json.dumps(state, allow_nan=False)
             except ValueError as exc:  # bad data, retrying can't fix it
