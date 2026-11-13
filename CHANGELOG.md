@@ -12,6 +12,8 @@
 - Fixed VOD detection. It relied on a Dispatcharr login key that expires 5 minutes after a VOD session starts, whether or not it's still playing. So stopping a movie early kept scheduled tests skipped for up to 5 more minutes, and after 5 minutes of watching a VOD stopped counting, so a scheduled test could run mid-movie. VOD now counts exactly while Dispatcharr reports the session as playing.
 - Live TV, catch-up and provider-connection detection now read the exact Redis keys Dispatcharr uses for its own stream limits. The old broad patterns could also match unrelated housekeeping keys.
 - Check Active Streams gives a short answer, e.g. "⚠ 2 active sessions (1 live, 1 VOD) | Scheduled tests would be skipped" or "✓ No active sessions | Scheduled tests would run". The Redis keys that matched are written to the Dispatcharr log.
+- Results now include loaded latency: ping measured while the line is busy downloading and uploading. A big jump over idle ping (bufferbloat) is a common cause of IPTV buffering even on fast connections. It's shown under Latency in the Discord embed (so the card stays two rows), as a "Loaded latency" line in plain-text posts, and in the log line, and it's included in the Prometheus result as `download_latency_ms` and `upload_latency_ms`. The Run Now popup shows it compactly after jitter as "Loaded 45/120 ms" (download/upload).
+- New Find Servers button. It lists the Ookla servers nearest to Dispatcharr's connection (through the VPN, if there is one), so you can pick an ID for "Speedtest Server ID". The nearest three show in the popup. The full list, with the pinned server marked, goes to the log, and to Discord as one server per line when a webhook is set. It doesn't run a speedtest or use real bandwidth.
 
 ## 1.1.1
 
