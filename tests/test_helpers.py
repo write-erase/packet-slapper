@@ -99,3 +99,12 @@ def test_discord_payloads_stay_under_limits():
     s = ps._summarize_result(FAKE_RESULT, "UTC")
     assert len(ps._format_discord_message(s)) < 2000
     assert len(ps._discord_embed(s)["embeds"][0]["fields"]) == 6
+
+
+def test_cli_lives_next_to_the_plugin_folder_not_inside_it():
+    # Dispatcharr replaces the plugin folder on every update, so the CLI must live outside it,
+    # and the location must follow wherever Dispatcharr's plugins directory actually is.
+    assert ps.PLUGIN_DIR == ROOT
+    assert ps.PLUGIN_DATA_DIR == os.path.join(os.path.dirname(ROOT), ".packet_slapper")
+    assert not os.path.commonpath([ps.PLUGIN_DIR, ps.BIN_DIR]) == ps.PLUGIN_DIR
+    assert ps._PLUGIN_KEY == os.path.basename(ROOT).lower().replace(" ", "_")

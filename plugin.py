@@ -26,9 +26,15 @@ try:
 except ImportError:  # pragma: no cover
     ZoneInfo = None
 
+# The folder Dispatcharr installed this plugin into, wherever its plugins directory is
+# (it can be moved with DISPATCHARR_PLUGINS_DIR, so it's never hardcoded here).
+PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 # Dispatcharr's registry key is the plugin folder name, lowercased with spaces as underscores.
-_PLUGIN_KEY = os.path.basename(os.path.dirname(os.path.abspath(__file__))).lower().replace(" ", "_") or "packet_slapper"
-PLUGIN_DATA_DIR = os.path.join("/data/plugins", _PLUGIN_KEY)
+_PLUGIN_KEY = os.path.basename(PLUGIN_DIR).lower().replace(" ", "_") or "packet_slapper"
+# The speedtest CLI and its config live next to the plugin folder, not inside it: Dispatcharr
+# replaces the whole plugin folder on every update, which used to delete the CLI each time.
+# Dispatcharr only loads folders that contain plugin.py or __init__.py, so it ignores this one.
+PLUGIN_DATA_DIR = os.path.join(os.path.dirname(PLUGIN_DIR), ".packet_slapper")
 BIN_DIR = os.path.join(PLUGIN_DATA_DIR, "bin")
 SPEEDTEST_BIN = os.path.join(BIN_DIR, "speedtest")
 SPEEDTEST_VERSION_FILE = os.path.join(BIN_DIR, "speedtest.version")

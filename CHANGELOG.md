@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- The speedtest CLI is now kept in a `.packet_slapper` folder next to the plugin's folder instead of inside it. Dispatcharr replaces the plugin folder on every update, so until now each update deleted the CLI and it had to be downloaded again. After this update it is downloaded one last time, then kept across updates.
+- The plugin no longer assumes Dispatcharr's plugins live in `/data/plugins`. It uses the folder Dispatcharr actually installed it into, so setups that move the plugins directory with `DISPATCHARR_PLUGINS_DIR` now find the CLI too.
+
 ## 1.1.1
 
 - Fixed the scheduler sometimes stopping for good after Dispatcharr reloaded the plugin. Dispatcharr stops and recreates plugins during a plugin discovery pass, which happens for example when the Plugins page is opened. If that happened while a scheduled speedtest was running, the new scheduler gave up after waiting 3 seconds for the old one, and no more scheduled tests ran until a button was clicked or Dispatcharr restarted. Status kept saying "RUNNING" for a few minutes in the meantime. Now each scheduler has its own stop flag, so the new one starts right away. The old one finishes its test, then hands over the schedule, and the new one carries on from it without testing again straight away.
