@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.2.0
 
 - The speedtest CLI is now kept in a `.packet_slapper` folder next to the plugin's folder instead of inside it. Dispatcharr replaces the plugin folder on every update, so until now each update deleted the CLI and it had to be downloaded again. After this update it is downloaded one last time, then kept across updates.
 - The plugin no longer assumes Dispatcharr's plugins live in `/data/plugins`. It uses the folder Dispatcharr actually installed it into, so setups that move the plugins directory with `DISPATCHARR_PLUGINS_DIR` now find the CLI too.
@@ -14,9 +14,6 @@
 - Check Active Streams gives a short answer, e.g. "⚠ 2 active sessions (1 live, 1 VOD) | Scheduled tests would be skipped" or "✓ No active sessions | Scheduled tests would run". The Redis keys that matched are written to the Dispatcharr log.
 - Results now include loaded latency: ping measured while the line is busy downloading and uploading. A big jump over idle ping (bufferbloat) is a common cause of IPTV buffering even on fast connections. It's shown under Latency in the Discord embed (so the card stays two rows), as a "Loaded latency" line in plain-text posts, and in the log line, and it's included in the Prometheus result as `download_latency_ms` and `upload_latency_ms`. The Run Now popup shows it compactly after jitter as "Loaded 45/120 ms" (download/upload).
 - New Find Servers button. It lists the Ookla servers nearest to Dispatcharr's connection (through the VPN, if there is one), so you can pick an ID for "Speedtest Server ID". The nearest three show in the popup. The full list, with the pinned server marked, goes to the log, and to Discord as one server per line when a webhook is set. It doesn't run a speedtest or use real bandwidth.
-
-## 1.1.1
-
 - Fixed the scheduler sometimes stopping for good after Dispatcharr reloaded the plugin. Dispatcharr stops and recreates plugins during a plugin discovery pass, which happens for example when the Plugins page is opened. If that happened while a scheduled speedtest was running, the new scheduler gave up after waiting 3 seconds for the old one, and no more scheduled tests ran until a button was clicked or Dispatcharr restarted. Status kept saying "RUNNING" for a few minutes in the meantime. Now each scheduler has its own stop flag, so the new one starts right away. The old one finishes its test, then hands over the schedule, and the new one carries on from it without testing again straight away.
 - `stop()` no longer clears the scheduler lease and schedule out from under a test that's still running. The scheduler releases them itself when it exits.
 - The scheduler lease and the "a test is running" slot are now renewed every 30 seconds while a test runs. Before, a slow CLI download plus a slow test could outlast both (4 minutes), letting a second worker start a second speedtest at the same time. Renewing and releasing them now checks ownership atomically, so one worker can never remove another's.
