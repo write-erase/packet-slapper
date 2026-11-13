@@ -78,13 +78,41 @@ class FakeRedis:
             return [k for k in list(self.d) if fnmatch.fnmatch(k, match)]
 
     def type(self, k):
-        return "string" if k in self.d else "none"
+        with self.lock:
+            self._gc()
+            v = self.d.get(k)
+        if v is None:
+            return "none"
+        return {set: "set", dict: "hash"}.get(type(v), "string")
 
-    # Only strings are stored here; the collection sizes exist for _key_size's lookup table.
+    def sadd(self, k, *members):
+        with self.lock:
+            self.d.setdefault(k, set()).update(members)
+
     def scard(self, k):
+        v = self.get(k)
+        return len(v) if isinstance(v, set) else 0
+
+    def hset(self, k, field=None, value=None, mapping=None):
+        with self.lock:
+            h = self.d.setdefault(k, {})
+            if mapping:
+                h.update({f: str(v) for f, v in mapping.items()})
+            if field is not None:
+                h[field] = str(value)
+
+    def hget(self, k, field):
+        v = self.get(k)
+        return v.get(field) if isinstance(v, dict) else None
+
+    def hlen(self, k):
+        v = self.get(k)
+        return len(v) if isinstance(v, dict) else 0
+
+    def llen(self, k):
         return 0
 
-    hlen = llen = zcard = scard
+    zcard = llen
 
 
 def load_plugin():

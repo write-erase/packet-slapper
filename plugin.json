@@ -377,7 +377,7 @@
     {
       "id": "check_streams",
       "label": "Check Active Streams",
-      "description": "Shows whether anyone is watching (live, VOD or catch-up) and which signals matched. This is what the scheduler checks before skipping a run. Does not run a speedtest.",
+      "description": "Shows whether anyone is watching live TV, VOD or catch-up right now. This is what the scheduler checks before skipping a run. The matched Redis keys are written to the Dispatcharr log. Does not run a speedtest.",
       "button_label": "Check",
       "button_variant": "filled",
       "button_color": "blue"

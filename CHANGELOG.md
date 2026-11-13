@@ -9,6 +9,9 @@
 - Results now link to their page on speedtest.net: the Discord embed's title is the link, plain-text posts get a "Result:" line, and the Dispatcharr log line ends with the URL.
 - The Run Now popup is shorter, because it doesn't grow to fit and long results were cut off. It now reads `⬇ … | ⬆ … | Ping … | Loss … | Jitter … | Host: <server location> | Source: <exit IP>`, followed by "⚠ N active sessions" if someone was watching and "Discord ✓" or "Discord ✗ (see log)" when a webhook is set. Server name, ISP, distance, time and the result link stay in the Discord post and in the full line written to Dispatcharr's log for every run.
 - The exit IP is not included in the Prometheus metrics key.
+- Fixed VOD detection. It relied on a Dispatcharr login key that expires 5 minutes after a VOD session starts, whether or not it's still playing. So stopping a movie early kept scheduled tests skipped for up to 5 more minutes, and after 5 minutes of watching a VOD stopped counting, so a scheduled test could run mid-movie. VOD now counts exactly while Dispatcharr reports the session as playing.
+- Live TV, catch-up and provider-connection detection now read the exact Redis keys Dispatcharr uses for its own stream limits. The old broad patterns could also match unrelated housekeeping keys.
+- Check Active Streams gives a short answer, e.g. "⚠ 2 active sessions (1 live, 1 VOD) | Scheduled tests would be skipped" or "✓ No active sessions | Scheduled tests would run". The Redis keys that matched are written to the Dispatcharr log.
 
 ## 1.1.1
 

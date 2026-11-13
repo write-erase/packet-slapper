@@ -635,17 +635,21 @@ def _get_redis_client(logger):
     return None
 
 
-# Redis key patterns that indicate someone is watching. Live TV client sets are
-# the layout I'm most sure of; VOD and catch-up key names differ between
-# Dispatcharr versions, so those patterns are deliberately broad. The
-# "Check Active Streams" button reports exactly which keys matched, so a
-# pattern that is too broad or too narrow is easy to spot and tune.
-_LIVE_PATTERNS = ("*:channel:*:clients",)
-_VOD_PATTERNS = ("*vod*connection*", "*vod*session*", "*vod*client*")
-_CATCHUP_PATTERNS = ("*timeshift*", "*catchup*", "*catch_up*")
-# Provider connection counters cover live, VOD and catch-up alike, so they act
-# as a catch-all if a session type uses key names the patterns above miss.
-_PROVIDER_COUNTER_PATTERNS = ("*profile_connections*",)
+# The Redis keys Dispatcharr itself uses to track who is connected (the same ones its
+# stream-limit check reads in apps/proxy/utils.py), so a viewer counts exactly as long as
+# Dispatcharr considers them connected.
+# Live TV and catch-up: one set per channel holding the IDs of its connected clients.
+# ts_proxy is the module's name in older Dispatcharr versions, live_proxy in newer ones.
+_LIVE_PATTERNS = ("live:channel:*:clients", "ts_proxy:channel:*:clients")
+_CATCHUP_PATTERNS = ("timeshift:channel:*:clients",)
+# VOD: one hash per playback session. It stays around for a while after playback stops
+# (so a seek or quick resume can reuse it), so only its active_streams count says whether
+# anyone is actually watching. (vod_session_user:* is only a login mapping that expires
+# 5 minutes after a session starts, whether or not it's still playing.)
+_VOD_PATTERNS = ("vod_persistent_connection:*",)
+# Open connections per provider profile. Covers every session type, so it acts as a
+# catch-all if a future Dispatcharr version moves the keys above.
+_PROVIDER_COUNTER_PATTERNS = ("profile_connections:*",)
 
 
 def _instance_id():
@@ -669,6 +673,16 @@ def _key_size(client, key):
     if size_fn:
         return size_fn(key)
     return 1 if key_type == "string" else 0
+
+
+def _vod_active_streams(client, key):
+    """How many streams are actually playing in a VOD session hash (0 when it's idle)."""
+    if _s(client.type(key)) != "hash":
+        return 0
+    try:
+        return int(_s(client.hget(key, "active_streams")) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _counter_value(client, key):
@@ -713,7 +727,7 @@ def _detect_activity(logger):
     try:
         return {
             "live": collect(_LIVE_PATTERNS, lambda k: _key_size(client, k)),
-            "vod": collect(_VOD_PATTERNS, lambda k: _key_size(client, k)),
+            "vod": collect(_VOD_PATTERNS, lambda k: _vod_active_streams(client, k)),
             "catch-up": collect(_CATCHUP_PATTERNS, lambda k: _key_size(client, k)),
             "provider connections": collect(_PROVIDER_COUNTER_PATTERNS, lambda k: _counter_value(client, k)),
         }
@@ -779,25 +793,37 @@ def _log_related_keys(logger, limit=60):
         logger.exception("Packet Slapper: failed listing related Redis keys")
 
 
+_CATEGORY_LABELS = {"live": "live", "vod": "VOD", "catch-up": "catch-up"}
+
+
 def _describe_active_streams(logger):
-    """Result text for the 'Check Active Streams' button."""
+    """Result text for the 'Check Active Streams' button.
+
+    Short enough for the popup; the Redis keys that matched go to the log.
+    """
     activity = _detect_activity(logger)
     if activity is None:
         return "Could not read viewer info from Redis; scheduled runs will treat this as idle. See the Dispatcharr log."
 
-    parts = []
-    for category, keys in activity.items():
-        if not keys:
-            parts.append(f"{category}: 0")
-            continue
-        items = list(keys.items())
-        shown = ", ".join(f"{k}={v}" for k, v in items[:3])
-        more = f" +{len(items) - 3} more" if len(items) > 3 else ""
-        parts.append(f"{category}: {len(items)} ({shown}{more})")
-
-    verdict = "a scheduled speedtest would be SKIPPED" if any(activity.values()) else "a scheduled speedtest would run"
+    busy = {category: keys for category, keys in activity.items() if keys}
+    if busy:
+        logger.info(f"Packet Slapper: Check Active Streams matched: {busy}")
+    else:
+        logger.info("Packet Slapper: Check Active Streams found no active sessions")
     _log_related_keys(logger)
-    return " | ".join(parts) + f" -> {verdict}."
+
+    if not busy:
+        return "\u2713 No active sessions | Scheduled tests would run"
+    n = _viewer_count(activity)
+    if n:
+        kinds = [
+            f"{sum(busy[c].values())} {label}"
+            for c, label in _CATEGORY_LABELS.items() if c in busy
+        ]
+        what = f"{n} active session{'s' if n != 1 else ''} ({', '.join(kinds)})"
+    else:
+        what = "Provider connections in use"
+    return f"\u26a0 {what} | Scheduled tests would be skipped"
 
 
 def _execute_run(settings, logger, manual=False):

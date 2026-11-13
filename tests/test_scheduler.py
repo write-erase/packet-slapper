@@ -99,7 +99,7 @@ def test_busy_when_another_process_is_testing(env):
 
 def test_run_now_warns_when_someone_is_watching(env):
     e = env()
-    e.redis.set("ts_proxy:channel:abc:clients", "x")
+    e.redis.sadd("live:channel:abc:clients", "client-1")
     out = e.ps.Plugin().run("run_now", {}, e.ctx)
     assert out["status"] == "ok"
     assert out["message"].endswith("| \u26a0 1 active session")
@@ -109,7 +109,7 @@ def test_run_now_warns_when_someone_is_watching(env):
 def test_scheduled_skip_is_recorded_for_prometheus(env):
     e = env()
     e.settings.update({"skip_if_streaming": True, "prometheus_enabled": True})
-    e.redis.set("ts_proxy:channel:abc:clients", "x")
+    e.redis.sadd("live:channel:abc:clients", "client-1")
     out = e.ps._do_one_run(e.settings, e.logger, manual=False)
     assert out["status"] == "skipped" and not e.runs
     state = json.loads(e.redis.get(e.ps._METRICS_KEY))
@@ -145,11 +145,11 @@ def test_popup_discord_and_session_suffixes(env, monkeypatch):
     e = env()
     e.settings["discord_webhook_url"] = "https://discord.example/webhook"
     monkeypatch.setattr(e.ps, "_post_to_discord", lambda url, payload, logger: True)
-    e.redis.set("ts_proxy:channel:a:clients", "x")
-    e.redis.set("ts_proxy:channel:b:clients", "x")
+    e.redis.sadd("live:channel:a:clients", "client-1")
+    e.redis.sadd("live:channel:b:clients", "client-2")
     msg = e.ps._do_one_run(e.settings, e.logger, manual=True)["message"]
     assert msg.endswith("| Source: 203.0.113.45 | ⚠ 2 active sessions | Discord ✓")
     monkeypatch.setattr(e.ps, "_post_to_discord", lambda url, payload, logger: False)
-    e.redis.delete("ts_proxy:channel:a:clients", "ts_proxy:channel:b:clients")
+    e.redis.delete("live:channel:a:clients", "live:channel:b:clients")
     msg = e.ps._do_one_run(e.settings, e.logger, manual=True)["message"]
     assert msg.endswith("| Source: 203.0.113.45 | Discord ✗ (see log)")
