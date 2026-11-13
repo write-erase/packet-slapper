@@ -103,6 +103,8 @@ FAKE_RESULT = {
     "packetLoss": 0,
     "isp": "Example ISP",
     "server": {"name": "Example", "location": "Chicago, IL", "country": "United States", "host": "speed.example.net", "distance": 12.3},
+    "interface": {"internalIp": "172.18.0.5", "name": "eth0", "isVpn": False, "externalIp": "203.0.113.45"},
+    "result": {"id": "8f2e1c4a", "url": "https://www.speedtest.net/result/c/8f2e1c4a", "persisted": True},
 }
 
 

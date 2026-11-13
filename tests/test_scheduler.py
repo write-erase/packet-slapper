@@ -102,7 +102,7 @@ def test_run_now_warns_when_someone_is_watching(env):
     e.redis.set("ts_proxy:channel:abc:clients", "x")
     out = e.ps.Plugin().run("run_now", {}, e.ctx)
     assert out["status"] == "ok"
-    assert "⚠ 1 viewer session active" in out["message"]
+    assert out["message"].endswith("| \u26a0 1 active session")
     assert len(e.runs) == 1  # Run Now still runs
 
 
@@ -127,3 +127,29 @@ def test_prometheus_publish_keeps_last_good_result_on_failure(env):
     assert after["last_attempt_success"] == 0
     assert after["result"] == good["result"]
     assert after["last_success_timestamp_seconds"] == good["last_success_timestamp_seconds"]
+
+
+def test_status_shows_exit_ip_and_metrics_leave_it_out(env):
+    e = env()
+    e.settings["prometheus_enabled"] = True
+    p = e.ps.Plugin()
+    out = p.run("run_now", {}, e.ctx)
+    assert out["status"] == "ok"
+    assert "(Source: 203.0.113.45)" in e.status(p)
+    metrics = json.loads(e.redis.get(e.ps._METRICS_KEY))
+    assert "exit_ip" not in metrics["result"]
+    assert metrics["result"]["result_url"].startswith("https://www.speedtest.net/")
+
+
+def test_popup_discord_and_session_suffixes(env, monkeypatch):
+    e = env()
+    e.settings["discord_webhook_url"] = "https://discord.example/webhook"
+    monkeypatch.setattr(e.ps, "_post_to_discord", lambda url, payload, logger: True)
+    e.redis.set("ts_proxy:channel:a:clients", "x")
+    e.redis.set("ts_proxy:channel:b:clients", "x")
+    msg = e.ps._do_one_run(e.settings, e.logger, manual=True)["message"]
+    assert msg.endswith("| Source: 203.0.113.45 | ⚠ 2 active sessions | Discord ✓")
+    monkeypatch.setattr(e.ps, "_post_to_discord", lambda url, payload, logger: False)
+    e.redis.delete("ts_proxy:channel:a:clients", "ts_proxy:channel:b:clients")
+    msg = e.ps._do_one_run(e.settings, e.logger, manual=True)["message"]
+    assert msg.endswith("| Source: 203.0.113.45 | Discord ✗ (see log)")

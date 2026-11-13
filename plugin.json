@@ -320,6 +320,13 @@
       "help_text": "Only used when a Discord webhook URL is configured."
     },
     {
+      "id": "discord_include_exit_ip",
+      "label": "Include exit IP in Discord posts",
+      "type": "boolean",
+      "default": false,
+      "help_text": "Adds the public IP address the test went out through (under ISP) to Discord posts. It always shows in Dispatcharr. Leave off if others can read the channel."
+    },
+    {
       "id": "server_id",
       "label": "Speedtest Server ID",
       "type": "string",

@@ -3,7 +3,7 @@ Packet Slapper runs an official Ookla speedtest directly from inside Dispatcharr
 
 Run it on demand or on a schedule. Click Run Now for a one-off test, or turn on the scheduler. Scheduled runs skip themselves automatically if anyone's watching live TV, VOD, or catch-up, since a speedtest eats real bandwidth.
 
-Results show right in Dispatcharr, no external service required. You get download, upload, latency, jitter, packet loss, and which server it hit. Add a Discord webhook if you want, and every result also posts there, either as a plain text message or a colored embed card.
+Results show right in Dispatcharr, no external service required. You get download, upload, latency, jitter, packet loss, which server it hit, a link to the result on speedtest.net, and the exit IP the test went out through, so you can see at a glance whether the VPN was in use. Add a Discord webhook if you want, and every result also posts there, either as a plain text message or a colored embed card. The exit IP is left out of Discord posts unless you turn on **Include exit IP in Discord posts**.
 
 A few extras, too. You can pin tests to one specific Ookla server ID so results stay comparable over time, pick your display timezone from a dropdown, and use Check Active Streams or Scheduler Status any time to see what the plugin is doing right now and when the next run is due. Run Now always runs, but if someone was watching at the time, the result says so.
 
