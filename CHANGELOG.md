@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.2.0
+
+- The speedtest CLI is now kept in a `.packet_slapper` folder next to the plugin's folder instead of inside it. Dispatcharr replaces the plugin folder on every update, so until now each update deleted the CLI and it had to be downloaded again. After this update it is downloaded one last time, then kept across updates.
+- The plugin no longer assumes Dispatcharr's plugins live in `/data/plugins`. It uses the folder Dispatcharr actually installed it into, so setups that move the plugins directory with `DISPATCHARR_PLUGINS_DIR` now find the CLI too.
+- Each result now shows the exit IP, the public address the test went out through, so you can confirm the VPN was in use. It's shown as "Source" in the Run Now popup and on Status's last-run line ("Source: 203.0.113.45").
+- New "Include exit IP in Discord posts" setting (off by default). When on, the IP appears under the ISP in the embed, or next to the ISP in plain-text posts.
+- Results now link to their page on speedtest.net: the Discord embed's title is the link, plain-text posts get a "Result:" line, and the Dispatcharr log line ends with the URL.
+- The Run Now popup is shorter, because it doesn't grow to fit and long results were cut off. It now reads `⬇ … | ⬆ … | Ping … | Loss … | Jitter … | Host: <server location> | Source: <exit IP>`, followed by "⚠ N active sessions" if someone was watching and "Discord ✓" or "Discord ✗ (see log)" when a webhook is set. Server name, ISP, distance, time and the result link stay in the Discord post and in the full line written to Dispatcharr's log for every run.
+- The exit IP is not included in the Prometheus metrics key.
+- Fixed VOD detection. It relied on a Dispatcharr login key that expires 5 minutes after a VOD session starts, whether or not it's still playing. So stopping a movie early kept scheduled tests skipped for up to 5 more minutes, and after 5 minutes of watching a VOD stopped counting, so a scheduled test could run mid-movie. VOD now counts exactly while Dispatcharr reports the session as playing.
+- Live TV, catch-up and provider-connection detection now read the exact Redis keys Dispatcharr uses for its own stream limits. The old broad patterns could also match unrelated housekeeping keys.
+- Check Active Streams gives a short answer, e.g. "⚠ 2 active sessions (1 live, 1 VOD) | Scheduled tests would be skipped" or "✓ No active sessions | Scheduled tests would run". The Redis keys that matched are written to the Dispatcharr log.
+- Results now include loaded latency: ping measured while the line is busy downloading and uploading. A big jump over idle ping (bufferbloat) is a common cause of IPTV buffering even on fast connections. It's shown under Latency in the Discord embed (so the card stays two rows), as a "Loaded latency" line in plain-text posts, and in the log line, and it's included in the Prometheus result as `download_latency_ms` and `upload_latency_ms`. The Run Now popup shows it compactly after jitter as "Loaded 45/120 ms" (download/upload).
+- New Find Servers button. It lists the Ookla servers nearest to Dispatcharr's connection (through the VPN, if there is one), so you can pick an ID for "Speedtest Server ID". The nearest three show in the popup. The full list, with the pinned server marked, goes to the log, and to Discord as one server per line when a webhook is set. It doesn't run a speedtest or use real bandwidth.
+- Fixed the scheduler sometimes stopping for good after Dispatcharr reloaded the plugin. Dispatcharr stops and recreates plugins during a plugin discovery pass, which happens for example when the Plugins page is opened. If that happened while a scheduled speedtest was running, the new scheduler gave up after waiting 3 seconds for the old one, and no more scheduled tests ran until a button was clicked or Dispatcharr restarted. Status kept saying "RUNNING" for a few minutes in the meantime. Now each scheduler has its own stop flag, so the new one starts right away. The old one finishes its test, then hands over the schedule, and the new one carries on from it without testing again straight away.
+- `stop()` no longer clears the scheduler lease and schedule out from under a test that's still running. The scheduler releases them itself when it exits.
+- The scheduler lease and the "a test is running" slot are now renewed every 30 seconds while a test runs. Before, a slow CLI download plus a slow test could outlast both (4 minutes), letting a second worker start a second speedtest at the same time. Renewing and releasing them now checks ownership atomically, so one worker can never remove another's.
+- The speedtest CLI is now installed, and checked for updates, in the background shortly after Dispatcharr starts, so the first Run Now after a restart no longer waits on a download. Only one worker does it.
+- The CLI update check now runs at most once a day, shared by all workers, instead of once per worker every time Dispatcharr starts.
+- New "Keep the Speedtest CLI up to date" setting (on by default). Turn it off to stay on the CLI you have; a missing CLI is still downloaded.
+- Run Now still runs while someone is watching, but the result now says so, since the numbers will be lower and the viewer may have seen buffering.
+- Prometheus: a scheduled run skipped because someone was watching now sets `last_skip_timestamp_seconds`, so staleness alerts can tell "busy" from "broken".
+- Check Active Streams no longer lists up to 60 Redis keys in the log at INFO level. That list is now only logged with debug logging on.
+- The plugin's name, version and description are now read from `plugin.json`, so they can't drift apart (the cause of the 1.0.3 fix).
+- The User-Agent sent to Ookla and Discord now carries the real plugin version.
+- Added a test suite (`tests/`) and a GitHub Actions workflow that runs it with a lint check on every push and pull request.
+
 ## 1.1.0
 
 - New "Publish results for Prometheus" setting (off by default). When it's on, every speedtest is saved to the Redis key `packet_slapper:prometheus:latest`, which the Dispatcharr Exporter plugin serves as `dispatcharr_speedtest_*` metrics. This requires an exporter release that includes the Packet Slapper integration, and its Packet Slapper setting turned on there too. Scheduled and Run Now tests both publish. A failed test records the failed attempt but keeps the last good result. Runs skipped because someone is watching are not published. Discord posting is unchanged and works alongside it.

@@ -1,0 +1,60 @@
+name: Release zip
+
+# Publish a release on GitHub as usual (tag vX.Y.Z). This workflow then checks the version,
+# runs the tests, builds packet-slapper.zip and attaches it to that release, which is the
+# file the Dispatcharr Plugin Hub downloads. Re-run the workflow to replace the zip.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+env:
+  # Dispatcharr names an imported plugin after the folder that holds plugin.py. Every
+  # release so far used GitHub's "Download ZIP" folder, so existing installs are keyed
+  # packet_slapper_main. Renaming this folder would make a manual import install a second,
+  # unconfigured copy instead of updating the existing one.
+  ZIP_FOLDER: packet-slapper-main
+  ZIP_NAME: packet-slapper.zip
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tag matches plugin.json version
+        run: |
+          tag="${{ github.event.release.tag_name }}"
+          version=$(python -c "import json; print(json.load(open('plugin.json'))['version'])")
+          if [ "${tag#v}" != "$version" ]; then
+            echo "::error::Release tag $tag does not match plugin.json version $version"
+            exit 1
+          fi
+
+      - name: Tests
+        run: |
+          pip install pytest ruff
+          ruff check --select F,E9,B plugin.py tests
+          pytest -q tests
+
+      - name: Build zip
+        run: |
+          mkdir -p "build/$ZIP_FOLDER"
+          cp plugin.py plugin.json logo.png README.md LICENSE CHANGELOG.md "build/$ZIP_FOLDER/"
+          (cd build && zip -r -X "../$ZIP_NAME" "$ZIP_FOLDER")
+          unzip -l "$ZIP_NAME"
+          unzip -l "$ZIP_NAME" | grep -q " $ZIP_FOLDER/plugin.py$" || { echo "::error::plugin.py missing from zip"; exit 1; }
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "$ZIP_NAME" --clobber

@@ -1,6 +1,6 @@
 {
   "name": "Packet Slapper",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Runs scheduled or on-demand Ookla Speedtests through Dispatcharr to measure speed and latency, with optional Discord posts and Prometheus metrics.",
   "author": "write-erase",
   "fields": [
@@ -320,12 +320,26 @@
       "help_text": "Only used when a Discord webhook URL is configured."
     },
     {
+      "id": "discord_include_exit_ip",
+      "label": "Include exit IP in Discord posts",
+      "type": "boolean",
+      "default": false,
+      "help_text": "Adds the public IP address the test went out through (under ISP) to Discord posts. It always shows in Dispatcharr. Leave off if others can read the channel."
+    },
+    {
       "id": "server_id",
       "label": "Speedtest Server ID",
       "type": "string",
       "default": "",
       "placeholder": "Blank = auto-select",
-      "help_text": "Specify an Ookla server by its numeric ID so results are comparable from run to run. Leave blank to let the tool pick the fastest server each time."
+      "help_text": "Specify an Ookla server by its numeric ID so results are comparable from run to run. Use 'Find Servers' to see the nearest IDs. Leave blank to let the tool pick the fastest server each time."
+    },
+    {
+      "id": "cli_auto_update",
+      "label": "Keep the Speedtest CLI up to date",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Checks Ookla's download server for a newer speedtest CLI at most once a day and installs it after a startup test. Turn off to stay on the version you have (a missing CLI is still downloaded)."
     },
     {
       "id": "prometheus_enabled",
@@ -363,8 +377,16 @@
     {
       "id": "check_streams",
       "label": "Check Active Streams",
-      "description": "Shows whether anyone is watching (live, VOD or catch-up) and which signals matched. This is what the scheduler checks before skipping a run. Does not run a speedtest.",
+      "description": "Shows whether anyone is watching live TV, VOD or catch-up right now. This is what the scheduler checks before skipping a run. The matched Redis keys are written to the Dispatcharr log. Does not run a speedtest.",
       "button_label": "Check",
+      "button_variant": "filled",
+      "button_color": "blue"
+    },
+    {
+      "id": "find_servers",
+      "label": "Find Servers",
+      "description": "Lists the Ookla servers nearest to Dispatcharr's connection, with their IDs, for 'Speedtest Server ID'. The nearest few show here; the full list goes to the Dispatcharr log, and to Discord if a webhook is set. Doesn't run a speedtest.",
+      "button_label": "Find",
       "button_variant": "filled",
       "button_color": "blue"
     }
