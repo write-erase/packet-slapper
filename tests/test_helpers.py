@@ -160,7 +160,7 @@ def test_settings_switch_controls_the_payload():
 def test_popup_is_short_and_log_line_has_everything():
     s = ps._summarize_result(FAKE_RESULT, "UTC")
     popup = ps._format_popup_message(s)
-    assert popup == "⬇ 912.4 Mbps | ⬆ 41.8 Mbps | Ping 9.12 ms | Loss 0% | Jitter 0.71 ms | Host: Chicago, IL | Source: 203.0.113.45"
+    assert popup == "⬇ 912.4 Mbps | ⬆ 41.8 Mbps | Ping 9.12 ms | Loss 0% | Jitter 0.71 ms | Loaded 45/120 ms | Host: Chicago, IL | Source: 203.0.113.45"
     full = ps._format_ui_message(s)
     for part in ("Example, Chicago, IL", "ISP: Example ISP", "12.3 km", s["result_url"]):
         assert part in full and part not in popup

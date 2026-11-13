@@ -380,6 +380,111 @@ def _run_speedtest(logger, server_id=None, auto_update=True):
     return result
 
 
+_SERVER_LIST_TIMEOUT = 30  # seconds
+_POPUP_SERVERS = 3          # the popup doesn't grow, so only the nearest few go there
+
+
+def _list_servers(logger, auto_update=True):
+    """The Ookla servers nearest to Dispatcharr's connection, nearest first.
+
+    Uses the same network path as a speedtest, so through a VPN this lists servers near
+    the VPN exit, which are the ones a test would actually pick. Uses no real bandwidth.
+    """
+    binary = _ensure_speedtest_binary(logger, auto_update)
+    cmd = [binary, "--accept-license", "--accept-gdpr", "--servers", "--format=json"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=_SERVER_LIST_TIMEOUT, env=_cli_env())
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Listing servers timed out after {_SERVER_LIST_TIMEOUT} seconds (is the VPN connection up?)") from None
+    except OSError as exc:
+        raise RuntimeError(f"Could not run the speedtest CLI ({exc}).") from exc
+
+    objects = _parse_cli_json(proc.stdout)
+    for obj in reversed(objects):
+        servers = obj.get("servers")
+        if isinstance(servers, list):
+            return [srv for srv in servers if isinstance(srv, dict) and srv.get("id") is not None]
+    _, error = _pick_result(objects)
+    detail = error or (proc.stderr or proc.stdout or "").strip()[:200] or f"exit code {proc.returncode}"
+    raise RuntimeError(f"Could not list servers ({detail})")
+
+
+def _server_label(srv):
+    name = str(srv.get("name") or "Unknown").strip()
+    location = str(srv.get("location") or "").strip()
+    return f"{name}, {location}" if location else name
+
+
+def _discord_servers_payload(servers, pinned, style):
+    """The full server list for Discord, one server per line, pinned one starred."""
+    locations = {str(srv.get("location") or "").strip() for srv in servers}
+    shared = locations.pop() if len(locations) == 1 and "" not in locations else None
+    lines = []
+    for srv in servers:
+        name = _clip(str(srv.get("name") or "Unknown").strip(), 60) if shared else _clip(_server_label(srv), 80)
+        line = f"`{srv.get('id')}`  {name}"
+        if pinned and str(srv.get("id")) == pinned:
+            line = f"\u2b50 {line} (pinned)"
+        lines.append(line)
+    title = "Nearest Ookla servers" + (f" ({shared})" if shared else "")
+    hint = "Put an ID in 'Speedtest Server ID' to pin it."
+    if pinned and not any(str(srv.get("id")) == pinned for srv in servers):
+        hint = f"Pinned server {pinned} isn't in this list. " + hint
+    if style == "plain":
+        return _clip("\n".join([f"**{title}**", *(f"> {line}" for line in lines), hint]), 1990)
+    return {"embeds": [{
+        "title": title,
+        "description": _clip("\n".join(lines), 3900),
+        "color": 0x3498DB,
+        "footer": {"text": hint},
+    }]}
+
+
+def _describe_servers(settings, logger):
+    """Result text for the 'Find Servers' button: nearest few in the popup, all of them in
+    the log, and in Discord when a webhook is set (the popup has no room for more)."""
+    try:
+        servers = _list_servers(logger, _auto_update(settings))
+    except RuntimeError as exc:
+        logger.error(f"Packet Slapper: {exc}")
+        return {"status": "error", "message": f"\u274c {exc}"}
+    if not servers:
+        return {"status": "error", "message": "\u274c Ookla returned no servers. Check that Dispatcharr can reach the internet."}
+
+    try:
+        pinned = _clean_server_id(settings.get("server_id"))
+    except RuntimeError:
+        pinned = ""
+    logger.info(f"Packet Slapper: {len(servers)} nearest Ookla servers (put one ID in 'Speedtest Server ID'):")
+    for srv in servers:
+        mark = "  <- pinned" if pinned and str(srv.get("id")) == pinned else ""
+        logger.info(f"Packet Slapper:   {srv.get('id')}  {_server_label(srv)}, {srv.get('country') or ''}  ({srv.get('host') or ''}){mark}".rstrip())
+
+    nearest = servers[:_POPUP_SERVERS]
+    locations = {str(srv.get("location") or "").strip() for srv in nearest}
+    if len(locations) == 1 and "" not in locations:
+        # All in one place (the usual case): say where once, then just name (ID).
+        shown = f"{locations.pop()}: " + " \u00b7 ".join(
+            f"{_clip(str(srv.get('name') or 'Unknown').strip(), 30)} ({srv.get('id')})" for srv in nearest
+        )
+    else:
+        shown = " \u00b7 ".join(f"{_clip(_server_label(srv), 40)} ({srv.get('id')})" for srv in nearest)
+    more = len(servers) - _POPUP_SERVERS
+    webhook_url = str(settings.get("discord_webhook_url") or "").strip()
+    posted = None
+    if webhook_url:
+        posted = _post_to_discord(webhook_url, _discord_servers_payload(servers, pinned, _discord_style(settings)), logger)
+    if posted is True:
+        tail = " | Full list posted to Discord"
+    elif posted is False:
+        tail = " | Discord \u2717 (see log)" + (f" | +{more} more in the log" if more > 0 else "")
+    else:
+        tail = f" | +{more} more in the log" if more > 0 else ""
+    if pinned and not any(str(srv.get("id")) == pinned for srv in servers):
+        tail += f" | Pinned {pinned} isn't in this list"
+    return {"status": "ok", "message": f"{shown}{tail}"}
+
+
 def _clean_server_id(raw):
     """Return a validated server ID string, '' for auto-select; raise on junk."""
     value = str(raw or "").strip()
@@ -405,6 +510,27 @@ def _fmt_loss(value, sep=""):
 def _clip(text, limit):
     text = str(text)
     return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
+def _loaded_latency(direction):
+    """Loaded latency in ms for one direction, or None if the CLI didn't report it."""
+    value = ((direction or {}).get("latency") or {}).get("iqm")
+    if value is None:
+        return None
+    try:
+        return round(float(value), 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fmt_loaded(s, sep=" / "):
+    """'⬇ 45.2 ms / ⬆ 120.4 ms' from whichever directions were reported, or None."""
+    parts = []
+    if s.get("download_latency_ms") is not None:
+        parts.append(f"\u2b07 {s['download_latency_ms']:g} ms")
+    if s.get("upload_latency_ms") is not None:
+        parts.append(f"\u2b06 {s['upload_latency_ms']:g} ms")
+    return sep.join(parts) or None
 
 
 def _summarize_result(result, tz_name):
@@ -441,6 +567,10 @@ def _summarize_result(result, tz_name):
         "upload_mbps": round(_num((result.get("upload") or {}).get("bandwidth")) / 125000, 2),
         "latency_ms": round(_num(ping.get("latency")), 2),
         "jitter_ms": round(_num(ping.get("jitter")), 2),
+        # Ping while the line is busy downloading / uploading (Ookla's interquartile mean).
+        # A big jump over idle ping is bufferbloat, which shows up as IPTV buffering.
+        "download_latency_ms": _loaded_latency(result.get("download")),
+        "upload_latency_ms": _loaded_latency(result.get("upload")),
         "packet_loss": round(_num(loss_raw), 1) if loss_raw is not None else None,
         "isp": result.get("isp") or "Unknown ISP",
         "server_name": server.get("name") or "Unknown Server",
@@ -471,6 +601,12 @@ def _format_popup_message(s):
         f"Loss {_fmt_loss(s['packet_loss'])}",
         f"Jitter {s['jitter_ms']} ms",
     ]
+    down, up = s.get("download_latency_ms"), s.get("upload_latency_ms")
+    if down is not None and up is not None:
+        parts.append(f"Loaded {down:.0f}/{up:.0f} ms")  # download/upload, rounded to fit the popup
+    elif down is not None or up is not None:
+        arrow, value = ("\u2b07", down) if down is not None else ("\u2b06", up)
+        parts.append(f"Loaded {arrow} {value:.0f} ms")
     if s.get("server_location") and s["server_location"] != "Unknown Location":
         parts.append(f"Host: {s['server_location']}")
     if s.get("exit_ip"):
@@ -487,6 +623,11 @@ def _format_ui_message(s):
         f"\u2b07 {s['download_mbps']} Mbps",
         f"\u2b06 {s['upload_mbps']} Mbps",
         f"Ping {s['latency_ms']} ms (jitter {s['jitter_ms']} ms)",
+    ]
+    loaded = _fmt_loaded(s)
+    if loaded:
+        parts.append(f"Loaded ping {loaded}")
+    parts += [
         f"Loss {_fmt_loss(s['packet_loss'])}",
         f"{s['server_name']}, {s['server_location']}",
         f"ISP: {s['isp']}",
@@ -513,7 +654,8 @@ def _format_discord_message(s, include_ip=False):
         f"> Host: {s['server_host']}",
         f"> ISP: {s['isp']}" + (f" (`{s['exit_ip']}`)" if include_ip and s.get("exit_ip") else ""),
         f"> Time: {s['time_display']}",
-        f"> Latency: `{s['latency_ms']} ms` (Jitter: {s['jitter_ms']} ms)",
+        f"> Latency: `{s['latency_ms']} ms` (Jitter: {s['jitter_ms']} ms)"
+        + (f"\n> Loaded latency: {_fmt_loaded(s)}" if _fmt_loaded(s) else ""),
         f"> Download: `{s['download_mbps']} Mbps`",
         f"> Upload: `{s['upload_mbps']} Mbps`",
         f"> Packet Loss: `{_fmt_loss(s['packet_loss'], ' ')}`",
@@ -530,6 +672,9 @@ def _discord_embed(s, include_ip=False):
     server_lines = [_clip(s["server_name"], 100), _clip(f"{s['server_location']}, {s['server_country']}", 100), f"`{_clip(s['server_host'], 100)}`"]
     if s["distance"] != "N/A":
         server_lines.append(s["distance"])
+    latency = f"**{s['latency_ms']}** ms\nJitter {s['jitter_ms']} ms"
+    if _fmt_loaded(s):
+        latency += f"\nLoaded {_fmt_loaded(s, sep=' ')}"  # in the same field, so the card stays two rows
     isp = _clip(s["isp"], 200)
     if include_ip and s.get("exit_ip"):
         isp += f"\n`{_clip(s['exit_ip'], 60)}`"  # under the ISP, so the card stays two rows
@@ -539,7 +684,7 @@ def _discord_embed(s, include_ip=False):
         "fields": [
             {"name": "\u2b07 Download", "value": f"**{s['download_mbps']}** Mbps", "inline": True},
             {"name": "\u2b06 Upload", "value": f"**{s['upload_mbps']}** Mbps", "inline": True},
-            {"name": "\U0001f3d3 Latency", "value": f"**{s['latency_ms']}** ms\nJitter {s['jitter_ms']} ms", "inline": True},
+            {"name": "\U0001f3d3 Latency", "value": latency, "inline": True},
             {"name": "\U0001f4c9 Packet loss", "value": _fmt_loss(s['packet_loss'], ' '), "inline": True},
             {"name": "\U0001f4cd Server", "value": "\n".join(server_lines), "inline": True},
             {"name": "\U0001f310 ISP", "value": isp, "inline": True},
@@ -1517,6 +1662,9 @@ class Plugin:
 
         if action == "check_streams":
             return {"status": "ok", "message": _describe_active_streams(logger)}
+
+        if action == "find_servers":
+            return _describe_servers(settings, logger)
 
         if action == "test_webhook":
             webhook_url = settings.get("discord_webhook_url", "")
