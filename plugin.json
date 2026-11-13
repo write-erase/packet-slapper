@@ -1,6 +1,6 @@
 {
   "name": "Packet Slapper",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "Runs scheduled or on-demand Ookla Speedtests through Dispatcharr to measure speed and latency, with optional Discord posts and Prometheus metrics.",
   "author": "write-erase",
   "fields": [
