@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- New VPN check alert (on by default as "Auto"). Every test reports whether it went through a VPN tunnel (like Gluetun's `tun0` or `wg0`), and once tests have used one, a test that doesn't gets a "⚠ VPN off" alert: in the popup, in Status, and as a red Discord post. Nothing to set up and no IP to enter. Without a VPN it never alerts. "Always expect a VPN" alerts from the first test, and "Off" turns it off (and makes Auto forget). It works when Dispatcharr runs on a VPN container's network (like Gluetun) or shares the host's VPN through host networking; a VPN on your router can't be seen from Dispatcharr, so it never alerts there.
+- New threshold alerts for download, upload, packet loss and loaded ping (bufferbloat). Each is off until you enter a number. A tripped alert shows in the popup (e.g. "⚠ ⬇<500"), in Status, and in an amber Discord post that says which limit was crossed.
+- New "Discord posts" setting. "Every result" (the default, as before) now highlights alerts and notes when they clear. "Only alerts and recoveries" posts once when an alert starts or changes, and once when everything is back to normal, instead of after every test.
+- A failed speedtest counts as an alert too, so with "Only alerts and recoveries" you hear about the first failure and about the recovery, not every failed run.
+- "Someone was watching" notes now use ▶ instead of ⚠, in the Run Now popup ("▶ 1 active session") and in Check Active Streams ("▶ 2 active sessions (1 live, 1 VOD) | Scheduled tests would be skipped"), so ⚠ only ever means an alert.
+
 ## 1.2.0
 
 - The speedtest CLI is now kept in a `.packet_slapper` folder next to the plugin's folder instead of inside it. Dispatcharr replaces the plugin folder on every update, so until now each update deleted the CLI and it had to be downloaded again. After this update it is downloaded one last time, then kept across updates.

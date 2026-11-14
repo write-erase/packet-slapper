@@ -57,6 +57,8 @@ _controller = None     # the current _Controller; older ones may still be finish
 _lock = threading.Lock()
 _local_last_run = {}    # fallback if Redis is unavailable
 _local_last_skip = {}   # same, for the skip streak
+_local_alert_state = {}  # same, for active alerts
+_local_vpn_seen = {}     # same, for VPN check "Auto"
 _last_settings = {}     # most recent settings seen by a button click (DB-read fallback)
 _logger_holder = {"logger": None}
 
@@ -77,6 +79,11 @@ _RUNNING_KEY = "packet_slapper:running"   # guards against two speedtests at onc
 # last value survives restarts; the exporter turns the timestamps into staleness alerts.
 _METRICS_KEY = "packet_slapper:prometheus:latest"
 _METRICS_ATTEMPTS = 3
+# Which alerts are currently active, so alerts-only mode posts once when a problem starts
+# or changes and once when it clears, instead of every run. No TTL: survives restarts.
+_ALERT_STATE_KEY = "packet_slapper:alerts"
+# Set once a test has gone through a VPN tunnel: VPN check "Auto" alerts from then on.
+_VPN_SEEN_KEY = "packet_slapper:vpn_seen"
 _LEADER_TTL = 240       # seconds; longer than the slowest speedtest so the lease isn't lost mid-run
 _STATE_TTL = 300
 _RUN_TTL = 240
@@ -533,6 +540,21 @@ def _fmt_loaded(s, sep=" / "):
     return sep.join(parts) or None
 
 
+# Interface names VPN software uses for its tunnel: OpenVPN (tun/tap), WireGuard (wg),
+# PPP-based VPNs, IPsec, and the names some VPN apps give their WireGuard tunnel.
+_VPN_INTERFACE_PREFIXES = ("tun", "tap", "wg", "ppp", "ipsec", "vti", "nordlynx", "proton", "mullvad")
+
+
+def _is_vpn_interface(interface):
+    """True/False for whether a test went through a VPN tunnel, None when unknown."""
+    name = str(interface.get("name") or "").strip().lower()
+    if interface.get("isVpn") is True or (name and name.startswith(_VPN_INTERFACE_PREFIXES)):
+        return True
+    if name or interface.get("isVpn") is False:
+        return False
+    return None
+
+
 def _summarize_result(result, tz_name):
     """Pull display-ready values out of the raw Ookla JSON (shared by Discord + UI)."""
     server = result.get("server") or {}
@@ -558,7 +580,8 @@ def _summarize_result(result, tz_name):
 
     ping = result.get("ping") or {}
     loss_raw = result.get("packetLoss")
-    exit_ip = str((result.get("interface") or {}).get("externalIp") or "").strip() or None
+    interface = result.get("interface") or {}
+    exit_ip = str(interface.get("externalIp") or "").strip() or None
     result_url = str((result.get("result") or {}).get("url") or "").strip()
     if not result_url.startswith("https://"):
         result_url = None  # only ever link to a real https result page
@@ -584,6 +607,10 @@ def _summarize_result(result, tz_name):
         "exit_ip": exit_ip,
         # The result's page on speedtest.net (the CLI shares results by default).
         "result_url": result_url,
+        # The network interface the test used (tun0 / wg0 through a VPN, eth0 without one),
+        # and whether that's a VPN tunnel. None when the CLI didn't say.
+        "interface_name": str(interface.get("name") or "").strip() or None,
+        "via_vpn": _is_vpn_interface(interface),
     }
 
 
@@ -939,6 +966,9 @@ def _log_related_keys(logger, limit=60):
 
 
 _CATEGORY_LABELS = {"live": "live", "vod": "VOD", "catch-up": "catch-up"}
+# Marks "someone was watching" notes. Not ⚠, which only ever means an alert. The
+# trailing U+FE0E asks for the plain text symbol rather than an emoji where fonts allow.
+_PLAYING = "\u25b6\ufe0e"
 
 
 def _describe_active_streams(logger):
@@ -968,7 +998,170 @@ def _describe_active_streams(logger):
         what = f"{n} active session{'s' if n != 1 else ''} ({', '.join(kinds)})"
     else:
         what = "Provider connections in use"
-    return f"\u26a0 {what} | Scheduled tests would be skipped"
+    return f"{_PLAYING} {what} | Scheduled tests would be skipped"
+
+
+# ---------------------------------------------------------------------------
+# Alerts: VPN leak and thresholds
+# ---------------------------------------------------------------------------
+
+def _threshold(settings, key, logger):
+    """A positive number from an alert setting, or None when it's blank, zero or not a number."""
+    raw = settings.get(key)
+    if raw in (None, ""):
+        return None
+    try:
+        value = float(str(raw).strip())
+    except ValueError:
+        logger.warning(f"Packet Slapper: ignoring alert setting {key}={raw!r} (not a number)")
+        return None
+    return value if value > 0 else None
+
+
+def _vpn_check_mode(settings):
+    mode = str(settings.get("vpn_check") or "auto").strip().lower()
+    return mode if mode in ("auto", "always", "off") else "auto"
+
+
+def _vpn_seen(logger):
+    """What VPN check 'Auto' remembers: {'interface': 'tun0', 'at': ...} once a test used a tunnel."""
+    client = _get_redis_client(logger)
+    if client is not None:
+        seen = _redis_get_json(client, _VPN_SEEN_KEY)
+        if isinstance(seen, dict):
+            return seen
+    return dict(_local_vpn_seen) or None
+
+
+def _set_vpn_seen(logger, seen):
+    _local_vpn_seen.clear()
+    if seen:
+        _local_vpn_seen.update(seen)
+    client = _get_redis_client(logger)
+    if client is None:
+        return
+    try:
+        if seen:
+            client.set(_VPN_SEEN_KEY, json.dumps(seen))  # no TTL: remembered across restarts
+        else:
+            client.delete(_VPN_SEEN_KEY)
+    except Exception:
+        logger.debug("Packet Slapper: could not save the VPN check state", exc_info=True)
+
+
+def _check_vpn(summary, settings, logger):
+    """Return (short, detail) if this test should have gone through a VPN and didn't, else None.
+
+    Auto: once any test has gone through a VPN tunnel, every later test is expected to.
+    Always: every test is expected to. Off: never checked (and Auto's memory is cleared).
+    A test that doesn't say which interface it used is never an alert.
+    """
+    mode = _vpn_check_mode(settings)
+    via = summary.get("via_vpn")
+    if mode == "off":
+        if _vpn_seen(logger):
+            _set_vpn_seen(logger, None)
+        return None
+    if via is True:
+        _set_vpn_seen(logger, {"interface": summary.get("interface_name"), "at": time.time()})
+        return None
+    if via is None:
+        return None
+    seen = _vpn_seen(logger)
+    if mode == "auto" and not seen:
+        return None  # no VPN so far: nothing to compare against
+    used = summary.get("interface_name") or "a regular network connection"
+    before = f" Earlier tests went through {seen.get('interface') or 'a VPN tunnel'}." if seen else ""
+    return ("VPN off", f"VPN not in use: this test went out through {used}, not a VPN tunnel.{before}")
+
+
+def _evaluate_alerts(summary, settings, logger):
+    """Return {code: (short, detail)} for every alert this result trips, in a fixed order."""
+    alerts = {}
+    vpn = _check_vpn(summary, settings, logger)
+    if vpn:
+        alerts["vpn"] = vpn
+
+    def low(code, key, value, short, label, unit):
+        limit = _threshold(settings, key, logger)
+        if limit is not None and value is not None and value < limit:
+            alerts[code] = (f"{short}<{limit:g}", f"{label} {value:g} {unit} is below your {limit:g} {unit} alert.")
+
+    def high(code, key, value, short, label, unit, extra=""):
+        limit = _threshold(settings, key, logger)
+        if limit is not None and value is not None and value > limit:
+            alerts[code] = (f"{short}>{limit:g}{unit}",
+                            f"{label} {value:g}{'' if unit == '%' else ' '}{unit} is above your {limit:g}{'' if unit == '%' else ' '}{unit} alert{extra}.")
+
+    low("download", "alert_min_download_mbps", summary.get("download_mbps"), "\u2b07", "Download", "Mbps")
+    low("upload", "alert_min_upload_mbps", summary.get("upload_mbps"), "\u2b06", "Upload", "Mbps")
+    high("loss", "alert_max_loss_pct", summary.get("packet_loss"), "Loss", "Packet loss", "%")
+    high("loaded", "alert_max_loaded_latency_ms", summary.get("download_latency_ms"), "Loaded", "Loaded ping \u2b07", "ms",
+         " (bufferbloat, a common cause of buffering)")
+    return alerts
+
+
+def _load_alert_state(logger):
+    client = _get_redis_client(logger)
+    if client is not None:
+        state = _redis_get_json(client, _ALERT_STATE_KEY)
+        if isinstance(state, dict):
+            return state
+    return dict(_local_alert_state)
+
+
+def _save_alert_state(logger, alerts, previous):
+    """Remember which alerts are active. 'since' is kept while the same alerts continue."""
+    if alerts:
+        since = previous.get("since") if previous.get("alerts") else None
+        state = {"alerts": {code: list(v) for code, v in alerts.items()}, "since": since or time.time()}
+    else:
+        state = {}
+    _local_alert_state.clear()
+    _local_alert_state.update(state)
+    client = _get_redis_client(logger)
+    if client is not None:
+        try:
+            if state:
+                client.set(_ALERT_STATE_KEY, json.dumps(state))
+            else:
+                client.delete(_ALERT_STATE_KEY)
+        except Exception:
+            logger.debug("Packet Slapper: could not save the alert state", exc_info=True)
+
+
+def _discord_post_mode(settings):
+    return "alerts" if str(settings.get("discord_post_mode") or "every").lower() == "alerts" else "every"
+
+
+def _alert_payload(payload, alerts, cleared, style):
+    """Mark a result post as an alert (or a recovery). Returns the payload unchanged when neither."""
+    if not alerts and not cleared:
+        return payload
+    lines = []
+    if alerts:
+        lines += [f"\u26a0 {detail}" for _, detail in alerts.values()]
+    if cleared:
+        names = ", ".join(short for short, _ in cleared.values())
+        lines.append(f"\u2705 Back to normal ({names})" if not alerts else f"\u2705 Cleared: {names}")
+    if style == "plain":
+        return "\n".join(lines) + "\n" + payload
+    embed = dict(payload["embeds"][0])
+    if alerts:
+        embed["title"] = "\u26a0 Packet Slapper Speedtest"
+        embed["color"] = 0xE74C3C if "vpn" in alerts else 0xF39C12  # red for a leak, amber otherwise
+    else:
+        embed["title"] = "\u2705 Packet Slapper Speedtest"
+    embed["description"] = _clip("\n".join(lines), 1500)
+    return {"embeds": [embed]}
+
+
+def _alert_popup_suffix(alerts, cleared):
+    if alerts:
+        return " | \u26a0 " + ", ".join(short for short, _ in alerts.values())
+    if cleared:
+        return " | \u2705 Back to normal"
+    return ""
 
 
 def _execute_run(settings, logger, manual=False):
@@ -990,7 +1183,7 @@ def _execute_run(settings, logger, manual=False):
         if activity and any(activity.values()):
             n = _viewer_count(activity)
             who = f"{n} active session{'s' if n != 1 else ''}" if n else "active provider connections"
-            watching_note = f" | \u26a0 {who}"
+            watching_note = f" | {_PLAYING} {who}"
 
     tz_name = str(settings.get("display_timezone") or _DEFAULT_TIMEZONE).strip()
     webhook_url = str(settings.get("discord_webhook_url") or "").strip()
@@ -1002,7 +1195,14 @@ def _execute_run(settings, logger, manual=False):
         summary = _summarize_result(result, tz_name)
     except Exception as exc:
         logger.error(f"Packet Slapper: speedtest failed: {exc}", exc_info=not isinstance(exc, RuntimeError))
-        _post_to_discord(webhook_url, _discord_error_payload(str(exc), style), logger)
+        previous = _load_alert_state(logger)
+        previous_alerts = {c: tuple(v) for c, v in (previous.get("alerts") or {}).items()}
+        # A failed test can't tell whether the other alerts still apply, so they're kept as they were.
+        alerts = dict(previous_alerts)
+        alerts["failed"] = ("Test failed", f"Speedtest failed: {_clip(str(exc), 300)}")
+        if _discord_post_mode(settings) == "every" or "failed" not in previous_alerts:
+            _post_to_discord(webhook_url, _discord_error_payload(str(exc), style), logger)
+        _save_alert_state(logger, alerts, previous)
         if prometheus:
             _publish_metrics(logger, ok=False)
         return {"status": "error", "message": f"\u274c Speedtest failed: {exc}"}
@@ -1011,9 +1211,26 @@ def _execute_run(settings, logger, manual=False):
     if watching_note:
         log_line += f"{watching_note} during this test, so results may be low and playback may have stuttered"
     logger.info(f"Packet Slapper: {log_line}")  # every run, scheduled or not, lands in the log
-    ui_message = _format_popup_message(summary) + watching_note
+    previous = _load_alert_state(logger)
+    previous_alerts = {c: tuple(v) for c, v in (previous.get("alerts") or {}).items()}
+    alerts = _evaluate_alerts(summary, settings, logger)
+    cleared = {c: v for c, v in previous_alerts.items() if c not in alerts}
+    for _, detail in alerts.values():
+        logger.warning(f"Packet Slapper: alert: {detail}")
+    if cleared and not alerts:
+        logger.info("Packet Slapper: all alerts cleared")
+    ui_message = _format_popup_message(summary) + _alert_popup_suffix(alerts, cleared) + watching_note
 
-    posted = _post_to_discord(webhook_url, _discord_result_payload(summary, style, _discord_include_ip(settings)), logger)
+    if _discord_post_mode(settings) == "every":
+        post = True
+    else:
+        # Alerts only: once when a problem starts or changes, once when it clears.
+        post = (bool(alerts) and set(alerts) != set(previous_alerts)) or (not alerts and bool(previous_alerts))
+    posted = None
+    if post:
+        payload = _discord_result_payload(summary, style, _discord_include_ip(settings))
+        posted = _post_to_discord(webhook_url, _alert_payload(payload, alerts, cleared, style), logger)
+    _save_alert_state(logger, alerts, previous)
     if posted is True:
         ui_message += " | Discord \u2713"
     elif posted is False:
@@ -1613,6 +1830,12 @@ def _describe_scheduler(settings, logger):
         if n >= _SKIP_HINT_AFTER:
             text += "; if nobody really is, use 'Check Active Streams' to see what's being detected"
         parts.append(text)
+
+    alert_state = _load_alert_state(logger)
+    if alert_state.get("alerts"):
+        names = ", ".join(v[0] for v in alert_state["alerts"].values())
+        since = f" since {_fmt_time(alert_state['since'], tz_name)}" if alert_state.get("since") else ""
+        parts.append(f"\u26a0 Alert{since}: {names}")
 
     cli_version = _installed_cli_version()
     parts.append(f"Speedtest CLI {cli_version}" if cli_version else "Speedtest CLI not installed yet (downloads on the first run)")
