@@ -19,7 +19,7 @@ def test_reload_during_a_scheduled_run_keeps_the_scheduler_alive(env):
     assert wait_for(lambda: e.redis.get(e.ps._LEADER_KEY) == e.ps._controller.leader_id, 3)
     assert len(watcher_threads()) == 1
     status = e.status(p)
-    assert "Scheduler RUNNING" in status and "Next run" in status
+    assert status.startswith("Every 1 min \u00b7 next ")
     assert len(e.runs) == 1  # the hand-off didn't trigger an immediate second test
 
 
@@ -33,7 +33,7 @@ def test_rapid_reloads_during_one_run(env):
     assert wait_for(lambda: len(watcher_threads()) == 1, 3)
     assert wait_for(lambda: e.redis.get(e.ps._LEADER_KEY) == e.ps._controller.leader_id, 3)
     assert len(e.runs) == 1
-    assert "Next run" in e.status(p)
+    assert " \u00b7 next " in e.status(p)
 
 
 def test_turning_the_scheduler_off_clears_it(env):
@@ -43,7 +43,7 @@ def test_turning_the_scheduler_off_clears_it(env):
     e.settings["scheduler_interval"] = "off"
     assert wait_for(lambda: e.redis.get(e.ps._LEADER_KEY) is None, 3)
     assert e.redis.get(e.ps._STATE_KEY) is None
-    assert "Scheduler STOPPED" in e.status(p)
+    assert e.status(p).startswith("Scheduler off |")
 
 
 def test_disable_while_idle_stops_promptly(env):
@@ -64,7 +64,7 @@ def test_reload_without_redis_inherits_the_schedule(env):
     p = e.ps.Plugin()
     time.sleep(1.5)
     assert len(e.runs) == 1
-    assert "Next run" in e.status(p)
+    assert " \u00b7 next " in e.status(p)
 
 
 def test_leases_are_renewed_during_a_long_run(env):
@@ -99,6 +99,7 @@ def test_busy_when_another_process_is_testing(env):
 
 def test_run_now_warns_when_someone_is_watching(env):
     e = env()
+    e.settings["run_now_wait"] = True
     e.redis.sadd("live:channel:abc:clients", "client-1")
     out = e.ps.Plugin().run("run_now", {}, e.ctx)
     assert out["status"] == "ok"
@@ -131,11 +132,12 @@ def test_prometheus_publish_keeps_last_good_result_on_failure(env):
 
 def test_status_shows_exit_ip_and_metrics_leave_it_out(env):
     e = env()
+    e.settings["run_now_wait"] = True
     e.settings["prometheus_enabled"] = True
     p = e.ps.Plugin()
     out = p.run("run_now", {}, e.ctx)
     assert out["status"] == "ok"
-    assert "(Source: 203.0.113.45)" in e.status(p)
+    assert "(manual) \u2705 \u2b07 912.4 / \u2b06 41.8 Mbps" in e.status(p)
     metrics = json.loads(e.redis.get(e.ps._METRICS_KEY))
     assert "exit_ip" not in metrics["result"]
     assert metrics["result"]["result_url"].startswith("https://www.speedtest.net/")

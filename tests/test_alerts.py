@@ -38,7 +38,7 @@ def embed(payload):
 def test_no_alert_settings_means_no_alerts(run):
     out, posts = run()
     assert "⚠" not in out["message"] and "✅" not in out["message"]
-    assert embed(posts[0])["title"] == "Packet Slapper Speedtest"
+    assert embed(posts[0])["title"] == "Packet Slapper speedtest"
     assert "description" not in embed(posts[0])
 
 
@@ -54,11 +54,11 @@ def test_vpn_auto_alerts_once_a_vpn_was_seen(run):
     out, posts = run(result=NO_VPN)
     assert "| ⚠ VPN off" in out["message"]
     e = embed(posts[0])
-    assert e["title"] == "⚠ Packet Slapper Speedtest" and e["color"] == 0xE74C3C
+    assert e["title"] == "⚠ Packet Slapper speedtest" and e["color"] == 0xE74C3C
     assert e["description"] == ("⚠ VPN not in use: this test went out through eth0, not a VPN tunnel. "
                                 "Earlier tests went through tun0.")
     status = run.env.status(run.env.ps.Plugin())
-    assert "⚠ Alert since" in status and ": VPN off" in status
+    assert "| \u26a0 VPN off since " in status
     out, posts = run(result=VPN)
     assert "✅ Back to normal" in out["message"]
     assert embed(posts[0])["description"] == "✅ Back to normal (VPN off)"
@@ -131,7 +131,7 @@ def test_alerts_only_mode_posts_on_start_change_and_recovery(run):
     out, posts = run(alert_min_upload_mbps="", alert_min_download_mbps="")
     assert out["message"].endswith("| ✅ Back to normal | Discord ✓")
     e = embed(posts[0])
-    assert e["title"] == "✅ Packet Slapper Speedtest"
+    assert e["title"] == "✅ Packet Slapper speedtest"
     assert e["description"] == "✅ Back to normal (⬇<1000, ⬆<50)"
     _, posts = run()
     assert posts == []  # back to quiet
@@ -177,7 +177,7 @@ def test_plain_style_alert_lines_come_first(run):
     _, posts = run(discord_style="plain", vpn_check="always")
     lines = posts[0].split("\n")
     assert lines[0].startswith("⚠ VPN not in use")
-    assert lines[1] == "**Packet Slapper Speedtest**"
+    assert lines[1] == "**Packet Slapper speedtest**"
 
 
 def test_alert_state_survives_in_redis(run):

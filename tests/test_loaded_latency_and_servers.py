@@ -14,9 +14,8 @@ def test_loaded_latency_in_summary_log_and_discord():
     assert s["download_latency_ms"] == 45.2 and s["upload_latency_ms"] == 120.4
     assert "Loaded ping ⬇ 45.2 ms / ⬆ 120.4 ms" in ps._format_ui_message(s)
     embed = ps._discord_embed(s)["embeds"][0]
-    assert len(embed["fields"]) == 6  # still two rows
-    latency = next(f for f in embed["fields"] if "Latency" in f["name"])["value"]
-    assert latency.endswith("\nLoaded ⬇ 45.2 ms ⬆ 120.4 ms")
+    loaded = next(f for f in embed["fields"] if "Loaded ping" in f["name"])
+    assert loaded == {"name": "\u23f3 Loaded ping", "value": "\u2b07 45 \u00b7 \u2b06 120 ms", "inline": True}
     assert "> Loaded latency: ⬇ 45.2 ms / ⬆ 120.4 ms" in ps._format_discord_message(s)
 
 
@@ -132,7 +131,7 @@ def test_find_servers_discord_shared_city_and_plain_style(cli, monkeypatch):
     monkeypatch.setattr(cli, "_post_to_discord", lambda url, payload, logger: sent.append(payload) or True)
     cli._describe_servers({"discord_webhook_url": "https://discord.example/x", "discord_style": "plain"}, logging.getLogger("t"))
     assert sent[0] == ("**Nearest Ookla servers (Dallas, TX)**\n> `22288`  Hivelocity\n> `72712`  Pavlov Media\n"
-                       "Put an ID in 'Speedtest Server ID' to pin it.")
+                       "Put an ID in 'Speedtest server ID' to pin it.")
 
 
 def test_find_servers_discord_failure_falls_back_to_log(cli, monkeypatch):
