@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.3.0
 
 - New VPN check alert (on by default as "Auto"). Every test reports whether it went through a VPN tunnel (like Gluetun's `tun0` or `wg0`), and once tests have used one, a test that doesn't gets a "⚠ VPN off" alert: in the popup, in Status, and as a red Discord post. Nothing to set up and no IP to enter. Without a VPN it never alerts. "Always expect a VPN" alerts from the first test, and "Off" turns it off (and makes Auto forget). It works when Dispatcharr runs on a VPN container's network (like Gluetun) or shares the host's VPN through host networking; a VPN on your router can't be seen from Dispatcharr, so it never alerts there.
 - New threshold alerts for download, upload, packet loss and loaded ping (bufferbloat). Each is off until you enter a number. A tripped alert shows in the popup (e.g. "⚠ ⬇<500"), in Status, and in an amber Discord post that says which limit was crossed.
