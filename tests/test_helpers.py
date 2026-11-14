@@ -47,7 +47,7 @@ def test_summarize_converts_bytes_per_second_to_mbps_and_timezone():
     assert s["packet_loss"] == 0.0
     assert s["distance"] == "12.3 km"
     assert s["time_local"].startswith("2026-11-13 05:00:00 CST")
-    assert "(2026-11-13 11:00:00 UTC)" in s["time_display"]
+    assert s["time_display"] == "2026-11-13 05:00:00 CST (11:00:00 UTC)"  # same day: no repeated date
 
 
 def test_missing_packet_loss_is_not_zero():
@@ -98,7 +98,7 @@ def test_discord_payloads_stay_under_limits():
     assert len(embed["description"]) <= 1500
     s = ps._summarize_result(FAKE_RESULT, "UTC")
     assert len(ps._format_discord_message(s)) < 2000
-    assert len(ps._discord_embed(s)["embeds"][0]["fields"]) == 6
+    assert len(ps._discord_embed(s)["embeds"][0]["fields"]) == 9
 
 
 def test_cli_lives_next_to_the_plugin_folder_not_inside_it():
@@ -130,15 +130,15 @@ def test_missing_or_odd_interface_and_result_are_left_out():
     assert ps._summarize_result(r2, "UTC")["result_url"] is None
 
 
-def test_discord_embed_ip_only_when_enabled_and_stays_two_rows():
+def test_discord_embed_ip_only_when_enabled():
     s = ps._summarize_result(FAKE_RESULT, "UTC")
     off = ps._discord_embed(s)["embeds"][0]
     on = ps._discord_embed(s, include_ip=True)["embeds"][0]
     assert off["url"] == on["url"] == s["result_url"]
     assert "203.0.113.45" not in json.dumps(off)
-    assert len(off["fields"]) == len(on["fields"]) == 6
+    assert len(off["fields"]) == len(on["fields"])
     isp = next(f for f in on["fields"] if "ISP" in f["name"])
-    assert isp["value"] == "Example ISP\n`203.0.113.45`"
+    assert isp["value"] == "Example ISP \u00b7 `203.0.113.45`"
 
 
 def test_discord_plain_ip_only_when_enabled():
@@ -170,3 +170,28 @@ def test_popup_leaves_out_unknown_host_and_missing_source():
     r = {k: v for k, v in FAKE_RESULT.items() if k not in ("interface", "server")}
     popup = ps._format_popup_message(ps._summarize_result(r, "UTC"))
     assert "Host:" not in popup and "Source:" not in popup
+
+
+def test_discord_embed_layout():
+    s = ps._summarize_result(FAKE_RESULT, "UTC")
+    e = ps._discord_embed(s)["embeds"][0]
+    names = [f["name"] for f in e["fields"]]
+    assert names == ["\u2b07 Download", "\u2b06 Upload", "\u23f1 Ping", "\u3030 Jitter", "\U0001f4e6 Packet loss",
+                     "\u23f3 Loaded ping", "\U0001f4cd Server", "\U0001f310 ISP", "\U0001f517 Result"]
+    inline = [f["inline"] for f in e["fields"]]
+    assert inline == [True] * 6 + [False] * 3  # two rows of three, then full-width lines
+    assert all("\n" not in f["value"] for f in e["fields"][:6])  # one line each, so rows line up
+    server = e["fields"][6]["value"]
+    assert server == "Example \u00b7 Chicago, IL, United States \u00b7 12.3 km\nspeed.example.net"
+    assert "`" not in server  # plain host text wraps cleanly
+    assert e["fields"][8]["value"] == "[View on speedtest.net](https://www.speedtest.net/result/c/8f2e1c4a)"
+    assert e["url"] == s["result_url"]
+
+
+def test_discord_embed_without_loaded_latency_or_link():
+    r = {k: v for k, v in FAKE_RESULT.items() if k != "result"}
+    r["download"] = {"bandwidth": 1}
+    r["upload"] = {"bandwidth": 1}
+    e = ps._discord_embed(ps._summarize_result(r, "UTC"))["embeds"][0]
+    names = [f["name"] for f in e["fields"]]
+    assert "\u23f3 Loaded ping" not in names and "\U0001f517 Result" not in names and "url" not in e
