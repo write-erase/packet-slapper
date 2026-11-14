@@ -327,6 +327,23 @@
       "help_text": "Adds the public IP address the test went out through (under ISP) to Discord posts. It always shows in Dispatcharr. Leave off if others can read the channel."
     },
     {
+      "id": "discord_post_mode",
+      "label": "Discord posts",
+      "type": "select",
+      "default": "every",
+      "options": [
+        {
+          "value": "every",
+          "label": "Every result (alerts highlighted)"
+        },
+        {
+          "value": "alerts",
+          "label": "Only alerts and recoveries"
+        }
+      ],
+      "help_text": "With 'Only alerts and recoveries', Discord gets one post when an alert below starts or changes (or a test fails), and one when everything is back to normal."
+    },
+    {
       "id": "server_id",
       "label": "Speedtest Server ID",
       "type": "string",
@@ -347,6 +364,55 @@
       "type": "boolean",
       "default": false,
       "help_text": "Saves each result in Redis for the Dispatcharr Exporter plugin to serve as dispatcharr_speedtest_* metrics. Only needed if you scrape Dispatcharr with Prometheus."
+    },
+    {
+      "id": "vpn_check",
+      "label": "Alert: VPN check",
+      "type": "select",
+      "default": "auto",
+      "options": [
+        {
+          "value": "auto",
+          "label": "Auto (alert if the VPN stops being used)"
+        },
+        {
+          "value": "always",
+          "label": "Always expect a VPN"
+        },
+        {
+          "value": "off",
+          "label": "Off"
+        }
+      ],
+      "help_text": "Checks that speedtests go through your VPN. Works when Dispatcharr uses a VPN container's network, like Gluetun. On Auto, you get an alert if a test skips the VPN after earlier tests used it. A VPN running on your router can't be detected."
+    },
+    {
+      "id": "alert_min_download_mbps",
+      "label": "Alert: download below (Mbps)",
+      "type": "number",
+      "placeholder": "Off",
+      "help_text": "Leave blank to turn off."
+    },
+    {
+      "id": "alert_min_upload_mbps",
+      "label": "Alert: upload below (Mbps)",
+      "type": "number",
+      "placeholder": "Off",
+      "help_text": "Leave blank to turn off."
+    },
+    {
+      "id": "alert_max_loss_pct",
+      "label": "Alert: packet loss above (%)",
+      "type": "number",
+      "placeholder": "Off",
+      "help_text": "Leave blank to turn off."
+    },
+    {
+      "id": "alert_max_loaded_latency_ms",
+      "label": "Alert: loaded ping above (ms)",
+      "type": "number",
+      "placeholder": "Off",
+      "help_text": "Ping while downloading (bufferbloat). Compare it with your normal idle ping; well above it usually means buffering. Leave blank to turn off."
     }
   ],
   "actions": [

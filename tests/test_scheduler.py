@@ -102,7 +102,7 @@ def test_run_now_warns_when_someone_is_watching(env):
     e.redis.sadd("live:channel:abc:clients", "client-1")
     out = e.ps.Plugin().run("run_now", {}, e.ctx)
     assert out["status"] == "ok"
-    assert out["message"].endswith("| \u26a0 1 active session")
+    assert out["message"].endswith("| \u25b6\ufe0e 1 active session")
     assert len(e.runs) == 1  # Run Now still runs
 
 
@@ -148,7 +148,7 @@ def test_popup_discord_and_session_suffixes(env, monkeypatch):
     e.redis.sadd("live:channel:a:clients", "client-1")
     e.redis.sadd("live:channel:b:clients", "client-2")
     msg = e.ps._do_one_run(e.settings, e.logger, manual=True)["message"]
-    assert msg.endswith("| Source: 203.0.113.45 | ⚠ 2 active sessions | Discord ✓")
+    assert msg.endswith("| Source: 203.0.113.45 | \u25b6\ufe0e 2 active sessions | Discord ✓")
     monkeypatch.setattr(e.ps, "_post_to_discord", lambda url, payload, logger: False)
     e.redis.delete("live:channel:a:clients", "live:channel:b:clients")
     msg = e.ps._do_one_run(e.settings, e.logger, manual=True)["message"]
