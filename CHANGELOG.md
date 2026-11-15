@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- README: the loaded latency and skip metrics are served by Dispatcharr Exporter 3.3.0 and later, as `dispatcharr_speedtest_download_latency_ms`, `dispatcharr_speedtest_upload_latency_ms` and `dispatcharr_speedtest_last_skip_timestamp_seconds`.
+
 ## 1.3.0
 
 - New VPN check alert (on by default as "Auto"). Every test reports whether it went through a VPN tunnel (like Gluetun's `tun0` or `wg0`), and once tests have used one, a test that doesn't gets a "⚠ VPN off" alert: in the popup, in Status, and as a red Discord post. Nothing to set up and no IP to enter. Without a VPN it never alerts. "Always expect a VPN" alerts from the first test, and "Off" turns it off (and makes Auto forget). It works when Dispatcharr runs on a VPN container's network (like Gluetun) or shares the host's VPN through host networking; a VPN on your router can't be seen from Dispatcharr, so it never alerts there.

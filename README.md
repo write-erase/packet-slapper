@@ -14,7 +14,7 @@ Packet Slapper can also tell you when something's wrong. Every test reports whet
 If you scrape Dispatcharr with Prometheus, Packet Slapper can hand each result to the [Dispatcharr Exporter](https://github.com/swvn-dispatch/dispatcharr-exporter) plugin, which serves it as `dispatcharr_speedtest_*` metrics. It takes two switches:
 
 1. In Packet Slapper, turn on **Publish results for Prometheus**.
-2. In the Dispatcharr Exporter, turn on its Packet Slapper integration (**[Integration: Packet Slapper] Include Statistics**). This needs an exporter release that includes the Packet Slapper integration.
+2. In the Dispatcharr Exporter, turn on its Packet Slapper integration (**[Integration: Packet Slapper] Include Statistics**). This needs Dispatcharr Exporter 3.2.0 or later; the loaded latency and skip metrics need 3.3.0 or later.
 
 Packet Slapper saves the latest result in Redis under `packet_slapper:prometheus:latest`:
 
@@ -27,7 +27,7 @@ Packet Slapper saves the latest result in Redis under `packet_slapper:prometheus
 }
 ```
 
-A failed test only updates the two `last_attempt_*` fields, so the last good numbers stay put and you can alert on `last_attempt_success == 0` or on `last_success_timestamp_seconds` getting old. `packet_loss` is `null` when the Ookla server doesn't report it, and the exporter leaves that metric out. Runs skipped because someone is watching don't count as attempts, so `last_success_timestamp_seconds` can age during long viewing sessions. Each skip sets `last_skip_timestamp_seconds`, so a staleness alert can stay quiet while recent skips explain the gap. The exporter only serves this as a metric once its Packet Slapper integration reads the field.
+A failed test only updates the two `last_attempt_*` fields, so the last good numbers stay put and you can alert on `last_attempt_success == 0` or on `last_success_timestamp_seconds` getting old. `packet_loss` is `null` when the Ookla server doesn't report it, and the exporter leaves that metric out. Runs skipped because someone is watching don't count as attempts, so `last_success_timestamp_seconds` can age during long viewing sessions. Each skip sets `last_skip_timestamp_seconds`, so a staleness alert can stay quiet while recent skips explain the gap. Dispatcharr Exporter 3.3.0 and later serve it as `dispatcharr_speedtest_last_skip_timestamp_seconds`, and loaded latency as `dispatcharr_speedtest_download_latency_ms` and `dispatcharr_speedtest_upload_latency_ms`.
 
 ## Development
 
