@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from conftest import Env
+from conftest import Env, load_plugin
 
 log = logging.getLogger("t")
 
@@ -101,3 +101,39 @@ def test_prewarm_only_runs_in_one_worker(tmp_path):
     m._PROCESS_TOKEN = "other"  # a second worker starting at the same time
     m._real_prewarm_cli(log, {})
     assert calls == [False]
+
+
+def test_data_dir_takes_over_and_adopts_the_1x_cli(tmp_path):
+    """2.x keeps the CLI in Dispatcharr's data directory. A CLI that 1.x installed next to the
+    plugin folder is copied over once, so updating doesn't download it again."""
+    m = load_plugin()
+    legacy = tmp_path / "plugins" / ".packet_slapper" / "bin"
+    legacy.mkdir(parents=True)
+    (legacy / "speedtest").write_text("#!/bin/sh\n")
+    (legacy / "speedtest.version").write_text("1.2.0")
+    m._LEGACY_DATA_DIR = str(tmp_path / "plugins" / ".packet_slapper")
+    data_dir = tmp_path / "plugins" / "_data" / "packet-slapper"
+
+    m._use_data_dir({"data_dir": str(data_dir)}, logging.getLogger("t"))
+
+    assert m.PLUGIN_DATA_DIR == str(data_dir)
+    assert m.SPEEDTEST_BIN == str(data_dir / "bin" / "speedtest")
+    assert os.access(m.SPEEDTEST_BIN, os.X_OK)
+    assert m._installed_cli_version() == "1.2.0"
+    assert (legacy / "speedtest").exists()  # the old copy is left alone
+
+
+def test_data_dir_without_a_1x_cli_stays_empty_until_first_run(tmp_path):
+    m = load_plugin()
+    m._LEGACY_DATA_DIR = str(tmp_path / "nothing-here")
+    data_dir = tmp_path / "_data" / "packet-slapper"
+    m._use_data_dir({"data_dir": str(data_dir)}, logging.getLogger("t"))
+    assert m.BIN_DIR == str(data_dir / "bin")
+    assert not os.path.exists(m.SPEEDTEST_BIN)
+
+
+def test_no_data_dir_keeps_the_current_paths(tmp_path):
+    m = load_plugin()
+    before = m.SPEEDTEST_BIN
+    m._use_data_dir({}, logging.getLogger("t"))
+    assert m.SPEEDTEST_BIN == before

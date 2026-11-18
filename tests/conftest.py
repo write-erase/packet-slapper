@@ -137,7 +137,12 @@ FAKE_RESULT = {
 
 
 class Env:
-    """A loaded plugin module wired to a fake Redis, a fake speedtest and in-memory settings."""
+    """A loaded plugin module wired to a fake Redis, a fake speedtest and in-memory settings.
+
+    start_leader() and stop_leader() stand in for Dispatcharr's leader election: they call
+    on_leader_acquired with a context like Dispatcharr's and run the scheduler service on a
+    thread with a stop event, the way Dispatcharr's service runner does.
+    """
 
     def __init__(self, tmp_path, redis_on=True, run_seconds=0.0):
         ps = load_plugin()
@@ -146,7 +151,8 @@ class Env:
         self.runs = []
         self.run_seconds = run_seconds
         self.settings = {"scheduler_interval": "1", "skip_if_streaming": False}
-        self.enabled = True
+        self.settings_error = None  # set to an exception to make get_settings() fail
+        self.services = []  # (stop_event, thread) per scheduler service started
 
         def fake_speedtest(logger, server_id=None, auto_update=True):
             self.runs.append(time.time())
@@ -155,7 +161,6 @@ class Env:
 
         ps._get_redis_client = lambda logger: self.redis
         ps._run_speedtest = fake_speedtest
-        ps._read_settings_from_db = lambda logger: (self.enabled, dict(self.settings))
         ps._real_prewarm_cli = ps._prewarm_cli
         ps._prewarm_cli = lambda logger, settings: None  # tests opt in via _real_prewarm_cli
         ps._STARTUP_DELAY = 0.05
@@ -167,10 +172,41 @@ class Env:
         ps.SPEEDTEST_VERSION_FILE = str(bin_dir / "speedtest.version")
         ps.SPEEDTEST_CHECKED_FILE = str(bin_dir / "speedtest.checked")
         self.logger = logging.getLogger("packet_slapper_test")
-        self.ctx = {"settings": self.settings, "logger": self.logger}
+        self.data_dir = str(tmp_path)
+        self.ctx = {"settings": self.settings, "logger": self.logger, "data_dir": self.data_dir}
 
     def status(self, plugin):
         return plugin.run("scheduler_status", {}, self.ctx)["message"]
+
+    def get_settings(self):
+        if self.settings_error is not None:
+            raise self.settings_error
+        return dict(self.settings)
+
+    def start_leader(self, plugin=None):
+        """Make this 'process' the leader: on_leader_acquired starts the scheduler service."""
+        plugin = plugin or self.ps.Plugin()
+
+        def start_service(target, name=None):
+            stop = threading.Event()
+            thread = threading.Thread(target=target, args=(stop,), daemon=True, name="packet-slapper-scheduler")
+            self.services.append((stop, thread))
+            thread.start()
+
+        plugin.on_leader_acquired({
+            "settings": dict(self.settings), "get_settings": self.get_settings, "logger": self.logger,
+            "data_dir": self.data_dir, "start_service": start_service,
+        })
+        return plugin
+
+    def stop_leader(self, plugin=None, join=5.0):
+        """What Dispatcharr does on disable, reload or lost leadership: set the stop event,
+        wait briefly for the thread, then call on_leader_lost."""
+        for stop, thread in self.services:
+            stop.set()
+            thread.join(join)
+        if plugin is not None:
+            plugin.on_leader_lost({"logger": self.logger, "data_dir": self.data_dir})
 
 
 def wait_for(cond, timeout=5.0):
@@ -196,7 +232,7 @@ def env(tmp_path):
         return e
 
     yield make
-    for e in made:  # stop every watcher a test left running
-        if e.ps._controller is not None:
-            e.ps._controller.stop.set()
+    for e in made:  # stop every scheduler service a test left running
+        for stop, _ in e.services:
+            stop.set()
     wait_for(lambda: not watcher_threads(), 3)
