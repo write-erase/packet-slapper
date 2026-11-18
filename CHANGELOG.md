@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.0.0
 
 Needs Dispatcharr 0.34.0 or newer. 1.3.0 is the final release for older Dispatcharr; it stays installable but won't be updated.
 
