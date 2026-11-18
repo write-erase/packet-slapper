@@ -62,16 +62,14 @@ def cli(tmp_path, monkeypatch):
 
     m.respond, m.calls = respond, calls
     yield m
-    if m._controller is not None:  # Plugin() starts a watcher; stop it so other tests see none
-        m._controller.stop.set()
-        m._controller.thread.join(timeout=3)
 
 
 def test_find_servers_popup_shows_nearest_three(cli, caplog):
     cli.respond(json.dumps(SERVERS))
     with caplog.at_level(logging.INFO):
-        out = cli.Plugin().run("find_servers", {}, {"settings": {"server_id": "1004"}, "logger": logging.getLogger("t")})
-    assert out == {"status": "ok", "message": "Alpha ISP, Chicago, IL (1001) \u00b7 Beta Fiber, Naperville, IL (1002) \u00b7 Gamma, Gary, IN (1003) | +2 more in the log"}
+        out = cli.Plugin().run("find_servers", {}, {"settings": {"server_id": "1004"}, "logger": logging.getLogger("t"), "data_dir": cli.PLUGIN_DATA_DIR})
+    assert out == {"status": "ok", "message": "Alpha ISP, Chicago, IL (1001) \u00b7 Beta Fiber, Naperville, IL (1002) \u00b7 Gamma, Gary, IN (1003) | +2 more in the log | Pick one under Speedtest server",
+                   "_dispatcharr": {"refresh": "plugin"}}
     assert "--servers" in cli.calls[-1] and "--format=json" in cli.calls[-1]
     assert "1004  Delta, Joliet, IL, United States  (d.example.net:8080)  <- pinned" in caplog.text
 
@@ -79,7 +77,7 @@ def test_find_servers_popup_shows_nearest_three(cli, caplog):
 def test_find_servers_notes_a_pinned_server_not_in_the_list(cli):
     cli.respond(json.dumps(SERVERS))
     out = cli._describe_servers({"server_id": "9999"}, logging.getLogger("t"))
-    assert out["message"].endswith("| +2 more in the log | Pinned 9999 isn't in this list")
+    assert out["message"].endswith("| +2 more in the log | Pinned 9999 isn't in this list | Pick one under Speedtest server")
 
 
 def test_find_servers_errors_are_readable(cli):
@@ -106,7 +104,7 @@ def test_find_servers_names_a_shared_city_once(cli):
     ]}
     cli.respond(json.dumps(same_city))
     out = cli._describe_servers({}, logging.getLogger("t"))
-    assert out["message"] == "Dallas, TX: Hivelocity (22288) \u00b7 Pavlov Media (72712) \u00b7 AT&T (69099) | +1 more in the log"
+    assert out["message"] == "Dallas, TX: Hivelocity (22288) \u00b7 Pavlov Media (72712) \u00b7 AT&T (69099) | +1 more in the log | Pick one under Speedtest server"
 
 
 def test_find_servers_posts_full_list_to_discord(cli, monkeypatch):
@@ -114,7 +112,7 @@ def test_find_servers_posts_full_list_to_discord(cli, monkeypatch):
     sent = []
     monkeypatch.setattr(cli, "_post_to_discord", lambda url, payload, logger: sent.append(payload) or True)
     out = cli._describe_servers({"discord_webhook_url": "https://discord.example/x", "server_id": "1004"}, logging.getLogger("t"))
-    assert out["message"].endswith("| Full list posted to Discord")
+    assert out["message"].endswith("| Full list posted to Discord | Pick one under Speedtest server")
     embed = sent[0]["embeds"][0]
     assert embed["title"] == "Nearest Ookla servers"  # different cities, so each line keeps its own
     lines = embed["description"].split("\n")
@@ -138,4 +136,44 @@ def test_find_servers_discord_failure_falls_back_to_log(cli, monkeypatch):
     cli.respond(json.dumps(SERVERS))
     monkeypatch.setattr(cli, "_post_to_discord", lambda url, payload, logger: False)
     out = cli._describe_servers({"discord_webhook_url": "https://discord.example/x"}, logging.getLogger("t"))
-    assert out["message"].endswith("| Discord \u2717 (see log) | +2 more in the log")
+    assert out["message"].endswith("| Discord \u2717 (see log) | +2 more in the log | Pick one under Speedtest server")
+
+
+def test_find_servers_turns_the_setting_into_a_dropdown(cli):
+    """Find servers saves what it found and asks Dispatcharr to reload the plugin; on that
+    reload, get_fields() offers the servers as a dropdown."""
+    cli.respond(json.dumps(SERVERS))
+    plugin = cli.Plugin()
+    before = {f["id"]: f for f in plugin.get_fields({"data_dir": cli.PLUGIN_DATA_DIR, "settings": {}})}
+    assert before["server_id"]["type"] == "string"  # nothing found yet: plain text box
+
+    plugin.run("find_servers", {}, {"settings": {}, "logger": logging.getLogger("t"), "data_dir": cli.PLUGIN_DATA_DIR})
+    fields = plugin.get_fields({"data_dir": cli.PLUGIN_DATA_DIR, "settings": {"server_id": "1002"}})
+    server = next(f for f in fields if f["id"] == "server_id")
+    assert server["type"] == "select" and server["section"] == "sec_speedtest"
+    assert server["default"] == "auto"
+    values = [o["value"] for o in server["options"]]
+    assert values == ["auto", "1001", "1002", "1003", "1004", "1005"]
+    assert server["options"][1]["label"] == "Alpha ISP \u00b7 Chicago, IL (1001)"
+    assert all(o["value"] for o in server["options"])  # Dispatcharr rejects blank option values
+    assert len(fields) == len(cli._MANIFEST["fields"])
+
+
+def test_dropdown_keeps_a_pinned_server_that_is_no_longer_listed(cli):
+    cli.respond(json.dumps(SERVERS))
+    plugin = cli.Plugin()
+    plugin.run("find_servers", {}, {"settings": {}, "logger": logging.getLogger("t"), "data_dir": cli.PLUGIN_DATA_DIR})
+    server = next(f for f in plugin.get_fields({"data_dir": cli.PLUGIN_DATA_DIR, "settings": {"server_id": "9999"}})
+                  if f["id"] == "server_id")
+    assert server["options"][-1] == {"value": "9999", "label": "Server 9999 (not in the last Find servers list)"}
+
+
+def test_auto_means_let_ookla_pick():
+    assert ps._clean_server_id("auto") == "" and ps._clean_server_id("") == ""
+    assert ps._clean_server_id(" 1004 ") == "1004"
+
+
+def test_bad_server_cache_falls_back_to_the_text_box(cli, tmp_path):
+    (tmp_path / "servers.json").write_text("not json")
+    fields = cli.Plugin().get_fields({"data_dir": str(tmp_path), "settings": {}})
+    assert next(f for f in fields if f["id"] == "server_id")["type"] == "string"

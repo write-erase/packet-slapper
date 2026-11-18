@@ -4,79 +4,101 @@ import time
 from conftest import wait_for, watcher_threads
 
 
-def test_reload_during_a_scheduled_run_keeps_the_scheduler_alive(env):
-    """Dispatcharr's discovery pass calls stop() then creates a new Plugin(). If that lands
-    mid-test, a new watcher must start and carry on with the same schedule."""
+def test_scheduler_only_runs_in_the_leader(env):
+    """Dispatcharr creates the plugin in every process. Only on_leader_acquired may start
+    anything, so creating Plugin() (or many of them) runs no test and starts no thread."""
+    e = env()
+    for _ in range(5):
+        e.ps.Plugin()
+    time.sleep(0.3)
+    assert not e.runs and not watcher_threads()
+    e.start_leader()
+    assert wait_for(lambda: e.runs)
+    assert len(watcher_threads()) == 1
+
+
+def test_reload_during_a_scheduled_run_carries_on(env):
+    """A reload stops the service mid-test. The test finishes, and the next leader picks up
+    the same schedule from Redis instead of testing again at once."""
     e = env(run_seconds=1.0)
-    p = e.ps.Plugin()
+    p = e.start_leader()
     assert wait_for(lambda: e.runs)
     time.sleep(0.2)
 
-    p.stop(e.ctx)
-    p = e.ps.Plugin()
+    e.stop_leader(p)  # Dispatcharr waits for the thread, which finishes its test first
+    assert e.redis.get(e.ps._LAST_RUN_KEY)
+    assert not watcher_threads()
+    p = e.start_leader()
+    time.sleep(0.5)
 
-    assert wait_for(lambda: e.redis.get(e.ps._LAST_RUN_KEY), 3)  # first run finished
-    assert wait_for(lambda: e.redis.get(e.ps._LEADER_KEY) == e.ps._controller.leader_id, 3)
     assert len(watcher_threads()) == 1
-    status = e.status(p)
-    assert status.startswith("Every 1 min \u00b7 next ")
+    assert e.status(p).startswith("Every 1 min \u00b7 next ")
     assert len(e.runs) == 1  # the hand-off didn't trigger an immediate second test
 
 
-def test_rapid_reloads_during_one_run(env):
-    e = env(run_seconds=1.0)
-    p = e.ps.Plugin()
+def test_two_leaders_at_once_never_test_twice(env):
+    """Dispatcharr's lease can briefly overlap (or every process leads without Redis'
+    lease). The shared 'a test is running' slot still allows only one test."""
+    e = env(run_seconds=0.6)
+    e.start_leader()
+    e.start_leader()
     assert wait_for(lambda: e.runs)
-    for _ in range(5):
-        p.stop(e.ctx)
-        p = e.ps.Plugin()
-    assert wait_for(lambda: len(watcher_threads()) == 1, 3)
-    assert wait_for(lambda: e.redis.get(e.ps._LEADER_KEY) == e.ps._controller.leader_id, 3)
+    time.sleep(0.8)
     assert len(e.runs) == 1
-    assert " \u00b7 next " in e.status(p)
 
 
 def test_turning_the_scheduler_off_clears_it(env):
     e = env(run_seconds=0.3)
-    p = e.ps.Plugin()
+    p = e.start_leader()
     assert wait_for(lambda: e.runs)
     e.settings["scheduler_interval"] = "off"
-    assert wait_for(lambda: e.redis.get(e.ps._LEADER_KEY) is None, 3)
-    assert e.redis.get(e.ps._STATE_KEY) is None
+    assert wait_for(lambda: e.redis.get(e.ps._STATE_KEY) is None, 3)
     assert e.status(p).startswith("Scheduler off |")
+    assert len(watcher_threads()) == 1  # the service keeps watching the setting
 
 
 def test_disable_while_idle_stops_promptly(env):
     e = env()
-    p = e.ps.Plugin()
+    p = e.start_leader()
     assert wait_for(lambda: e.runs and e.redis.get(e.ps._LAST_RUN_KEY))
-    p.stop(e.ctx)
-    assert wait_for(lambda: not watcher_threads(), 1)
-    assert e.redis.get(e.ps._LEADER_KEY) is None
+    started = time.time()
+    e.stop_leader(p)
+    assert time.time() - started < 1
+    assert not watcher_threads()
     assert len(e.runs) == 1
 
 
-def test_reload_without_redis_inherits_the_schedule(env):
-    e = env(redis_on=False, run_seconds=0.6)
-    p = e.ps.Plugin()
-    assert wait_for(lambda: e.runs)
-    p.stop(e.ctx)
-    p = e.ps.Plugin()
-    time.sleep(1.5)
-    assert len(e.runs) == 1
-    assert " \u00b7 next " in e.status(p)
+def test_settings_read_failure_carries_on_with_the_last_settings(env, caplog):
+    import logging
+    e = env()
+    e.ps._DB_WARN_AFTER_SECONDS = 0.5
+    e.start_leader()
+    assert wait_for(lambda: e.redis.get(e.ps._STATE_KEY))
+    with caplog.at_level(logging.WARNING):
+        e.settings_error = RuntimeError("database is down")
+        time.sleep(0.3)
+        assert "couldn't read this plugin's saved settings" not in caplog.text
+        assert wait_for(lambda: "couldn't read this plugin's saved settings" in caplog.text, 2)
+    assert e.redis.get(e.ps._STATE_KEY)  # still scheduling with the settings it had
 
 
-def test_leases_are_renewed_during_a_long_run(env):
+def test_no_settings_yet_means_no_schedule(env):
+    e = env()
+    e.settings_error = RuntimeError("database is down")
+    e.start_leader()
+    time.sleep(0.4)
+    assert not e.runs and e.redis.get(e.ps._STATE_KEY) is None
+
+
+def test_run_slot_is_renewed_during_a_long_run(env):
     e = env(run_seconds=2.0)
     ps = e.ps
-    ps._RUN_TTL = ps._LEADER_TTL = 1
+    ps._RUN_TTL = 1
     ps._KEEPALIVE_SECONDS = 0.2
-    ps.Plugin()
+    e.start_leader()
     assert wait_for(lambda: e.runs)
-    time.sleep(1.5)  # past both TTLs
+    time.sleep(1.5)  # past the TTL
     assert ps._s(e.redis.get(ps._RUNNING_KEY)) == ps._instance_id()
-    assert e.redis.get(ps._LEADER_KEY) == ps._controller.leader_id
     assert wait_for(lambda: e.redis.get(ps._LAST_RUN_KEY), 3)
     assert e.redis.get(ps._RUNNING_KEY) is None  # released at the end
 
@@ -99,7 +121,6 @@ def test_busy_when_another_process_is_testing(env):
 
 def test_run_now_warns_when_someone_is_watching(env):
     e = env()
-    e.settings["run_now_wait"] = True
     e.redis.sadd("live:channel:abc:clients", "client-1")
     out = e.ps.Plugin().run("run_now", {}, e.ctx)
     assert out["status"] == "ok"
@@ -132,7 +153,6 @@ def test_prometheus_publish_keeps_last_good_result_on_failure(env):
 
 def test_status_shows_exit_ip_and_metrics_leave_it_out(env):
     e = env()
-    e.settings["run_now_wait"] = True
     e.settings["prometheus_enabled"] = True
     p = e.ps.Plugin()
     out = p.run("run_now", {}, e.ctx)
@@ -155,3 +175,41 @@ def test_popup_discord_and_session_suffixes(env, monkeypatch):
     e.redis.delete("live:channel:a:clients", "live:channel:b:clients")
     msg = e.ps._do_one_run(e.settings, e.logger, manual=True)["message"]
     assert msg.endswith("| Source: 203.0.113.45 | Discord ✗ (see log)")
+
+
+def test_a_second_scheduler_stands_by(env, caplog):
+    """If two schedulers run at once (Dispatcharr's lease overlapping, every process leading
+    without Redis, or a 1.x watcher left running after an update), only the one holding the
+    scheduler lock schedules tests; the other stands by and doesn't touch the shared state."""
+    import logging
+    e = env(run_seconds=0.2)
+    e.start_leader()
+    assert wait_for(lambda: e.runs and e.redis.get(e.ps._LAST_RUN_KEY))
+    first_leader = e.redis.get(e.ps._LEADER_KEY)
+    with caplog.at_level(logging.INFO):
+        e.start_leader()
+        assert wait_for(lambda: "standing by" in caplog.text, 3)
+    time.sleep(0.5)
+    assert e.redis.get(e.ps._LEADER_KEY) == first_leader
+    assert len(e.runs) == 1  # the second scheduler didn't start its own schedule
+    assert e.status(e.ps.Plugin()).startswith("Every 1 min · next ")
+
+
+def test_lock_is_handed_over_when_the_leader_stops(env):
+    e = env()
+    p = e.start_leader()
+    assert wait_for(lambda: e.redis.get(e.ps._LEADER_KEY))
+    e.stop_leader(p)
+    assert e.redis.get(e.ps._LEADER_KEY) is None  # released, so the next leader starts at once
+    assert e.redis.get(e.ps._STATE_KEY)  # but the schedule is kept for it
+
+
+def test_lock_is_renewed_during_a_long_scheduled_run(env):
+    e = env(run_seconds=2.0)
+    ps = e.ps
+    ps._LEADER_TTL = 1
+    ps._KEEPALIVE_SECONDS = 0.2
+    e.start_leader()
+    assert wait_for(lambda: e.runs)
+    time.sleep(1.5)  # past the lock's TTL
+    assert e.redis.get(ps._LEADER_KEY)

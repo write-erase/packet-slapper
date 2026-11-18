@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+Needs Dispatcharr 0.34.0 or newer. 1.3.0 is the final release for older Dispatcharr; it stays installable but won't be updated.
+
+After updating from 1.x, restart Dispatcharr once. 1.x ran a scheduler thread in every Dispatcharr process, and a restart makes sure none of them is left running alongside 2.x. (If one is, the shared scheduler lock keeps it from testing on its own schedule.)
+
+- The scheduler now runs as a Dispatcharr-managed background service. Dispatcharr picks one process to run it and stops or moves it cleanly when the plugin is disabled, reloaded or updated, or when Dispatcharr restarts. Packet Slapper no longer starts a thread in every Dispatcharr process. It still keeps its own scheduler lock in Redis, so if two schedulers ever run at once (Dispatcharr's leader lease can briefly overlap), the second stands by instead of testing on its own schedule.
+- Run speedtest now uses Dispatcharr's background tasks. Its popup shows progress while the test runs and then the result: green, yellow if an alert tripped (or Prometheus couldn't be updated, or another test was already running), red if the test failed. Each run is kept in the plugin's run history, with the full result as a JSON download. This replaces 1.3's own background thread and notification, and the "Run speedtest now: wait for the result" setting.
+- Find servers now turns "Speedtest server ID" into a dropdown of the servers it found, so there's no ID to copy. It saves the list and has Dispatcharr reload the plugin to show it (Dispatcharr only builds dropdown choices when it loads a plugin); the schedule carries on from where it was. Choose "Automatic" to let Ookla pick again. A pinned server that's no longer nearby stays in the list, marked as such.
+- Settings are grouped into sections: Schedule and Discord open, and Alerts, Speedtest server and CLI, and Prometheus folded away.
+- The Speedtest CLI lives in Dispatcharr's data folder for the plugin (`/data/plugins/_data/packet-slapper`). Updating from 1.x copies the CLI over, so it isn't downloaded again.
+- The manifest declares what the plugin needs (manifest version 2), so Dispatcharr shows it for approval when you enable or update the plugin: a background service, background tasks, running the Speedtest CLI, and network access.
+- On a Dispatcharr older than 0.34, the buttons say that this version needs 0.34.0 or newer, instead of quietly never running the scheduler.
 - README: the loaded latency and skip metrics are served by Dispatcharr Exporter 3.3.0 and later, as `dispatcharr_speedtest_download_latency_ms`, `dispatcharr_speedtest_upload_latency_ms` and `dispatcharr_speedtest_last_skip_timestamp_seconds`.
 
 ## 1.3.0
