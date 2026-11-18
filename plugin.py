@@ -2,10 +2,14 @@
 Packet Slapper: a speedtest plugin for Dispatcharr.
 
 Runs scheduled or on-demand Ookla Speedtests through your Dispatcharr instance.
+
+The 2.x line uses the plugin features added in Dispatcharr 0.34: the schedule runs as a
+persistent service in one process Dispatcharr picks (on_leader_acquired), Run speedtest now
+is an async action with progress and run history, and files live in the plugin's own data
+directory. 1.3.0 is the last release for Dispatcharr older than 0.34.
 """
 
 import hashlib
-import importlib
 import json
 import shutil
 import logging
@@ -29,21 +33,22 @@ except ImportError:  # pragma: no cover
 # The folder Dispatcharr installed this plugin into, wherever its plugins directory is
 # (it can be moved with DISPATCHARR_PLUGINS_DIR, so it's never hardcoded here).
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
-# Dispatcharr's registry key is the plugin folder name, lowercased with spaces as underscores.
-_PLUGIN_KEY = os.path.basename(PLUGIN_DIR).lower().replace(" ", "_") or "packet_slapper"
-# The speedtest CLI and its config live next to the plugin folder, not inside it: Dispatcharr
-# replaces the whole plugin folder on every update, which used to delete the CLI each time.
-# Dispatcharr only loads folders that contain plugin.py or __init__.py, so it ignores this one.
-PLUGIN_DATA_DIR = os.path.join(os.path.dirname(PLUGIN_DIR), ".packet_slapper")
+# Where 1.x kept the Speedtest CLI: next to the plugin folder, so updates didn't delete it.
+# 2.x uses the data directory Dispatcharr gives each plugin (see _use_data_dir) and copies
+# a CLI from here the first time, so updating from 1.x doesn't download it again.
+_LEGACY_DATA_DIR = os.path.join(os.path.dirname(PLUGIN_DIR), ".packet_slapper")
+# Until Dispatcharr hands over its data directory (in run() and on_leader_acquired), these
+# point at the 1.x location. _use_data_dir() repoints all of them at once.
+PLUGIN_DATA_DIR = _LEGACY_DATA_DIR
 BIN_DIR = os.path.join(PLUGIN_DATA_DIR, "bin")
 SPEEDTEST_BIN = os.path.join(BIN_DIR, "speedtest")
 SPEEDTEST_VERSION_FILE = os.path.join(BIN_DIR, "speedtest.version")
+SPEEDTEST_CHECKED_FILE = os.path.join(BIN_DIR, "speedtest.checked")  # mtime = last update check
 # Known-good CLI version, used for a first install and as the floor when looking for
 # newer releases. Newer releases are picked up automatically (see _ensure_speedtest_binary),
 # so this never needs bumping.
 SPEEDTEST_CLI_BASE_VERSION = "1.2.0"
 _CLI_URL = "https://install.speedtest.net/app/cli/ookla-speedtest-{version}-linux-{arch}.tgz"
-SPEEDTEST_CHECKED_FILE = os.path.join(BIN_DIR, "speedtest.checked")  # mtime = last update check
 _UPDATE_CHECK_INTERVAL = 24 * 3600  # look for a newer CLI at most once a day (shared by all workers)
 _CLI_CHECK_LOCK_KEY = "packet_slapper:cli_check"  # lets one worker do the startup install/check
 _cli_update_checked_at = 0.0  # in-process backstop if the marker file can't be written
@@ -53,24 +58,25 @@ SPEEDTEST_TIMEOUT = 90  # seconds
 
 # Module-level so state survives across Plugin instances (Dispatcharr may
 # re-instantiate the class between calls to run()).
-_controller = None     # the current _Controller; older ones may still be finishing a run
-_lock = threading.Lock()
+_active_scheduler = None  # this process's _Scheduler while it holds the schedule
 _local_last_run = {}    # fallback if Redis is unavailable
 _local_last_skip = {}   # same, for the skip streak
 _local_alert_state = {}  # same, for active alerts
 _local_vpn_seen = {}     # same, for VPN check "Auto"
 _local_current_run = {}  # same, for the test in progress
-_last_settings = {}     # most recent settings seen by a button click (DB-read fallback)
-_logger_holder = {"logger": None}
 
 _PROCESS_TOKEN = uuid.uuid4().hex[:8]
 _run_lock = threading.Lock()
 _DEFAULT_INTERVAL_MINUTES = 60
 
-# The scheduler is driven by the "Scheduler" setting. Dispatcharr has no
-# "setting saved" hook, so one small watcher thread per process re-reads the saved
-# setting every few seconds. Redis holds a lease so only one process (Dispatcharr
-# can run several workers) actually runs the schedule, plus shared status.
+# The schedule runs as this plugin's persistent service: Dispatcharr picks one process
+# (on_leader_acquired) and runs _Scheduler.serve on a thread it owns. The service re-reads
+# the saved settings every few seconds, since Dispatcharr has no "setting saved" hook.
+# Redis holds the schedule's state, so Status works in any process and a new leader
+# picks up where the last one stopped.
+# Only the scheduler holding this lock schedules tests. Dispatcharr's leader election
+# should already allow just one, but its lease isn't a strict lock (and without Redis every
+# process leads), so a second scheduler stands by instead of running its own schedule.
 _LEADER_KEY = "packet_slapper:scheduler:leader"
 _STATE_KEY = "packet_slapper:scheduler:state"
 _LAST_RUN_KEY = "packet_slapper:last_run"
@@ -86,7 +92,7 @@ _METRICS_ATTEMPTS = 3
 _ALERT_STATE_KEY = "packet_slapper:alerts"
 # Set once a test has gone through a VPN tunnel: VPN check "Auto" alerts from then on.
 _VPN_SEEN_KEY = "packet_slapper:vpn_seen"
-_LEADER_TTL = 240       # seconds; longer than the slowest speedtest so the lease isn't lost mid-run
+_LEADER_TTL = 240       # seconds; longer than the slowest speedtest, and renewed during one
 _STATE_TTL = 300
 _RUN_TTL = 240
 _TICK_SECONDS = 5
@@ -94,7 +100,7 @@ _KEEPALIVE_SECONDS = 30   # how often leases are renewed while a speedtest is ru
 _BUSY_RETRY_SECONDS = 60  # retry delay when a scheduled run finds another test in progress
 _SKIP_RETRY_SECONDS = 1800  # retry delay after a run is skipped because someone was watching
 _SKIP_HINT_AFTER = 3    # skips in a row before Status suggests checking what is being detected
-_STARTUP_DELAY = 10     # let Dispatcharr finish starting before the first DB read
+_STARTUP_DELAY = 10     # let Dispatcharr finish starting before the first settings read
 _DB_WARN_AFTER_SECONDS = 60  # settings reads failing this long get a warning in the log
 
 
@@ -123,10 +129,55 @@ def _installed_cli_version():
         return None
 
 
-def _set_last_settings(settings):
-    """Replace the cached settings in one step, so the background thread never sees a half-filled dict."""
-    global _last_settings
-    _last_settings = dict(settings)
+def _use_data_dir(context, logger):
+    """Keep the CLI in the data directory Dispatcharr gives this plugin (context["data_dir"]).
+
+    It survives plugin updates, and writing there needs no extra permission. On the first
+    switch, a CLI that 1.x installed next to the plugin folder is copied over.
+    """
+    global PLUGIN_DATA_DIR, BIN_DIR, SPEEDTEST_BIN, SPEEDTEST_VERSION_FILE, SPEEDTEST_CHECKED_FILE
+    data_dir = str((context or {}).get("data_dir") or "")
+    if not data_dir or os.path.abspath(data_dir) == os.path.abspath(PLUGIN_DATA_DIR):
+        return
+    with _install_lock:
+        PLUGIN_DATA_DIR = data_dir
+        BIN_DIR = os.path.join(data_dir, "bin")
+        SPEEDTEST_BIN = os.path.join(BIN_DIR, "speedtest")
+        SPEEDTEST_VERSION_FILE = os.path.join(BIN_DIR, "speedtest.version")
+        SPEEDTEST_CHECKED_FILE = os.path.join(BIN_DIR, "speedtest.checked")
+        _adopt_legacy_cli(logger)
+
+
+def _adopt_legacy_cli(logger):
+    """Copy the CLI that 1.x installed (plugins/.packet_slapper/bin) into the data directory."""
+    legacy_bin_dir = os.path.join(_LEGACY_DATA_DIR, "bin")
+    legacy_bin = os.path.join(legacy_bin_dir, "speedtest")
+    if os.path.abspath(legacy_bin_dir) == os.path.abspath(BIN_DIR):
+        return
+    if os.path.isfile(SPEEDTEST_BIN) or not os.path.isfile(legacy_bin):
+        return
+    staged = f"{SPEEDTEST_BIN}.new.{os.getpid()}"
+    try:
+        os.makedirs(BIN_DIR, exist_ok=True)
+        with open(legacy_bin, "rb") as src, open(staged, "wb") as out:
+            shutil.copyfileobj(src, out)
+        os.chmod(staged, 0o700)
+        os.replace(staged, SPEEDTEST_BIN)
+        try:
+            with open(os.path.join(legacy_bin_dir, "speedtest.version")) as fh:
+                version = fh.read().strip()
+        except OSError:
+            version = ""
+        if version:
+            with open(SPEEDTEST_VERSION_FILE, "w") as fh:
+                fh.write(version)
+        logger.info(f"Packet Slapper: moved the Speedtest CLI into {BIN_DIR}")
+    except OSError as exc:
+        try:
+            os.remove(staged)
+        except OSError:
+            pass
+        logger.warning(f"Packet Slapper: could not copy the old Speedtest CLI ({exc}); it will be downloaded again")
 
 
 def _version_tuple(version):
@@ -182,7 +233,9 @@ def _install_cli(version, arch, logger):
 
     staged = f"{SPEEDTEST_BIN}.new.{os.getpid()}"  # per process, so two workers can't collide
     try:
-        with tempfile.TemporaryDirectory() as tmp:
+        # The temporary download sits inside the data directory too, so every file this
+        # plugin writes stays where Dispatcharr allows it without the filesystem_write permission.
+        with tempfile.TemporaryDirectory(dir=BIN_DIR) as tmp:
             tgz_path = os.path.join(tmp, "speedtest.tgz")
             with urllib.request.urlopen(url, timeout=60) as resp, open(tgz_path, "wb") as out:  # noqa: S310 - fixed Ookla CDN URL
                 shutil.copyfileobj(resp, out)
@@ -203,10 +256,10 @@ def _install_cli(version, arch, logger):
                     os.remove(staged)  # clear any leftover from an interrupted install
                 except OSError:
                     pass
-                # Owner-only: only the user Dispatcharr runs as needs to execute it.
-                fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
-                with src, os.fdopen(fd, "wb") as out:
+                with src, open(staged, "xb") as out:
                     shutil.copyfileobj(src, out)
+                # Owner-only: only the user Dispatcharr runs as needs to execute it.
+                os.chmod(staged, 0o700)
         if version != SPEEDTEST_CLI_BASE_VERSION:
             # A release we haven't seen before: make sure it starts on this system before it
             # replaces the working one. If it doesn't, the old binary stays in place.
@@ -492,13 +545,84 @@ def _describe_servers(settings, logger):
         tail = f" | +{more} more in the log" if more > 0 else ""
     if pinned and not any(str(srv.get("id")) == pinned for srv in servers):
         tail += f" | Pinned {pinned} isn't in this list"
-    return {"status": "ok", "message": f"{shown}{tail}"}
+    if not _save_server_list(servers, logger):
+        return {"status": "ok", "message": f"{shown}{tail}"}
+    # Dispatcharr only builds dropdown choices when it loads a plugin, so ask it to reload
+    # Packet Slapper: get_fields() then turns 'Speedtest server' into a list of these servers.
+    return {
+        "status": "ok",
+        "message": f"{shown}{tail} | Pick one under Speedtest server",
+        "_dispatcharr": {"refresh": "plugin"},
+    }
+
+
+_AUTO_SERVER = "auto"
+_SERVER_LIST_FILE = "servers.json"
+_SERVER_LIST_MAX = 20
+
+
+def _server_list_path(data_dir=None):
+    return os.path.join(data_dir or PLUGIN_DATA_DIR, _SERVER_LIST_FILE)
+
+
+def _save_server_list(servers, logger):
+    """Keep what Find servers found, for the 'Speedtest server' dropdown."""
+    keep = [
+        {k: srv.get(k) for k in ("id", "name", "location", "country", "host")}
+        for srv in servers[:_SERVER_LIST_MAX]
+    ]
+    path = _server_list_path()
+    tmp = f"{path}.new.{os.getpid()}"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"found_at": time.time(), "servers": keep}, fh)
+        os.replace(tmp, path)
+        return True
+    except OSError as exc:
+        logger.warning(f"Packet Slapper: could not save the server list ({exc})")
+        return False
+
+
+def _load_server_list(data_dir):
+    try:
+        with open(_server_list_path(data_dir), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    servers = data.get("servers") if isinstance(data, dict) else None
+    return [s for s in servers or [] if isinstance(s, dict) and str(s.get("id") or "").isdigit()]
+
+
+def _server_field(field, servers, saved):
+    """The 'Speedtest server' setting as a dropdown of the servers Find servers found."""
+    auto_label = "Automatic (Ookla picks a nearby server each time)"
+    options = [{"value": _AUTO_SERVER, "label": auto_label}]
+    for srv in servers:
+        name = str(srv.get("name") or "Unknown").strip()
+        location = str(srv.get("location") or "").strip()
+        label = f"{name} \u00b7 {location}" if location else name
+        options.append({"value": str(srv["id"]), "label": f"{_clip(label, 60)} ({srv['id']})"})
+    if saved and saved not in {o["value"] for o in options}:
+        options.append({"value": saved, "label": f"Server {saved} (not in the last Find servers list)"})
+    out = {k: v for k, v in field.items() if k not in ("placeholder", "type", "default")}
+    out.update({
+        "label": "Speedtest server",
+        "type": "select",
+        "default": _AUTO_SERVER,
+        "placeholder": auto_label,
+        "options": options,
+        "help_text": "Pins tests to one Ookla server so results are comparable from run to run. "
+                     "These are the servers the last 'Find servers' found; click it again after "
+                     "changing VPN location. Automatic lets Ookla pick each time.",
+    })
+    return out
 
 
 def _clean_server_id(raw):
     """Return a validated server ID string, '' for auto-select; raise on junk."""
     value = str(raw or "").strip()
-    if not value:
+    if not value or value.lower() == _AUTO_SERVER:
         return ""
     if not (value.isascii() and value.isdigit()):
         raise RuntimeError(f"Server ID must be a number (got '{value}'). Leave it blank to auto-select.")
@@ -809,28 +933,13 @@ def _post_to_discord(webhook_url, payload, logger):
 
 
 def _get_redis_client(logger):
-    """Get Dispatcharr's Redis client without depending on the proxy module name.
-
-    Newer Dispatcharr versions renamed apps.proxy.ts_proxy to apps.proxy.live_proxy,
-    so try the shared helper first, then both proxy module paths.
-    """
+    """Dispatcharr's shared Redis client, or None if it isn't available."""
     try:
         from core.utils import RedisClient  # type: ignore
-        client = RedisClient.get_client()
-        if client is not None:
-            return client
+        return RedisClient.get_client()
     except Exception:
-        logger.debug("Packet Slapper: core.utils.RedisClient unavailable", exc_info=True)
-
-    for module_path in ("apps.proxy.live_proxy.server", "apps.proxy.ts_proxy.server"):
-        try:
-            module = importlib.import_module(module_path)
-            client = getattr(module.ProxyServer.get_instance(), "redis_client", None)
-            if client is not None:
-                return client
-        except Exception:
-            logger.debug(f"Packet Slapper: could not use {module_path}", exc_info=True)
-    return None
+        logger.debug("Packet Slapper: Dispatcharr's Redis client is unavailable", exc_info=True)
+        return None
 
 
 # The Redis keys Dispatcharr itself uses to track who is connected (the same ones its
@@ -1190,7 +1299,8 @@ def _alert_popup_suffix(alerts, cleared):
     return ""
 
 
-def _execute_run(settings, logger, manual=False):
+def _execute_run(settings, logger, manual=False, progress=None):
+    progress = progress or (lambda percent, message=None: None)
     prometheus = bool(settings.get("prometheus_enabled", False))
     if not manual and settings.get("skip_if_streaming", True) and _any_active_streams(logger):
         logger.info("Packet Slapper: skipping scheduled run, active streams detected")
@@ -1217,6 +1327,7 @@ def _execute_run(settings, logger, manual=False):
 
     try:
         server_id = _clean_server_id(settings.get("server_id"))
+        progress(15, "Testing ping, download and upload (about 30 seconds)")
         result = _run_speedtest(logger, server_id, _auto_update(settings))
         summary = _summarize_result(result, tz_name)
     except Exception as exc:
@@ -1233,6 +1344,7 @@ def _execute_run(settings, logger, manual=False):
             _publish_metrics(logger, ok=False)
         return {"status": "error", "message": f"\u274c Speedtest failed: {exc}"}
 
+    progress(90, "Checking alerts and sending results")
     log_line = _format_ui_message(summary)
     if watching_note:
         log_line += f"{watching_note} during this test, so results may be low and playback may have stuttered"
@@ -1246,6 +1358,7 @@ def _execute_run(settings, logger, manual=False):
     if cleared and not alerts:
         logger.info("Packet Slapper: all alerts cleared")
     ui_message = _format_popup_message(summary) + _alert_popup_suffix(alerts, cleared) + watching_note
+    alert_names = [name for name, _ in alerts.values()]
 
     if _discord_post_mode(settings) == "every":
         post = True
@@ -1265,10 +1378,11 @@ def _execute_run(settings, logger, manual=False):
     if prometheus and not _publish_metrics(logger, ok=True, summary=summary):
         # The test itself worked, so this isn't retried early: that would spend bandwidth on a
         # new test every minute for as long as Redis is down.
-        return {"status": "publish_error", "message": ui_message + " | Prometheus \u2717 (see log)", "result": summary}
+        return {"status": "publish_error", "message": ui_message + " | Prometheus \u2717 (see log)",
+                "result": summary, "alerts": alert_names}
 
     # "message" is what Dispatcharr shows in the popup; "result" carries the raw numbers.
-    return {"status": "ok", "message": ui_message, "result": summary}
+    return {"status": "ok", "message": ui_message, "result": summary, "alerts": alert_names}
 
 
 # Compare-and-act scripts, so a lease is only renewed or removed by the holder that set it,
@@ -1314,9 +1428,8 @@ def _delete_if_owner(client, key, owner):
 
 
 class _LeaseKeeper:
-    """While a speedtest runs, renew the 'running' slot and (for scheduled runs) the
-    scheduler lease, so a slow CLI download plus a slow test can't outlive either one
-    and let a second test start somewhere else."""
+    """While a speedtest runs, renew the 'a test is running' slot, so a slow CLI download
+    plus a slow test can't outlive it and let a second test start in another process."""
 
     def __init__(self, client, leader_id=None):
         self.client = client
@@ -1384,30 +1497,21 @@ def _end_run(client):
     _run_lock.release()
 
 
-def _do_one_run(settings, logger, manual=False, leader_id=None):
-    """Run (or skip) one speedtest and remember the outcome for the status button.
+def _do_one_run(settings, logger, manual=False, progress=None, leader_id=None):
+    """Run (or skip) one speedtest and remember the outcome for Status.
 
     Blocks for the length of the speedtest (up to SPEEDTEST_TIMEOUT seconds). Called by the
-    scheduler's watcher thread, and by Run Now when "Run Now: wait for the result" is on;
-    otherwise Run Now uses _start_background_run so Dispatcharr's request returns at once.
-
-    leader_id: the scheduler lease to keep renewed while this (scheduled) run is going.
+    scheduler service, and by Run speedtest now, which Dispatcharr runs as a background task.
+    progress: Dispatcharr's report_progress(percent, message) for Run speedtest now, or None.
+    leader_id: for a scheduled run, the scheduler lock to keep renewed while it runs.
     """
     claimed, client = _begin_run(logger, manual)
     if not claimed:
         logger.info("Packet Slapper: a speedtest is already running; not starting another")
-        return _BUSY
-    return _run_claimed(settings, logger, manual, leader_id, client)
-
-
-_BUSY = {"status": "busy", "message": "A speedtest is already running. Try again in a minute."}
-
-
-def _run_claimed(settings, logger, manual, leader_id, client):
-    """Run one test in a slot _begin_run already claimed, release it, and record the outcome."""
+        return dict(_BUSY)
     try:
         with _LeaseKeeper(client, leader_id):
-            outcome = _execute_run(settings, logger, manual)
+            outcome = _execute_run(settings, logger, manual, progress)
     finally:
         _end_run(client)
         try:
@@ -1422,82 +1526,35 @@ def _run_claimed(settings, logger, manual, leader_id, client):
     return outcome
 
 
-def _run_now_waits(settings):
-    return bool(settings.get("run_now_wait", False))
+_BUSY = {"status": "busy", "message": "A speedtest is already running. Try again in a minute."}
 
 
-_GUI_NOTIFICATION_KEY = "packet-slapper-run-now-result"
-_GUI_NOTIFICATION_HOURS = 24
+def _task_result(outcome):
+    """Turn a run's outcome into what Dispatcharr's task popup and run history expect.
 
-
-def _notify_gui(logger, outcome):
-    """Show a background Run Now's result in Dispatcharr's own UI: a popup (toast) in every open
-    browser, and one entry in the notification bell that each new result replaces.
-
-    Uses Dispatcharr's notification system (core.models.SystemNotification and
-    core.utils.send_websocket_notification). If this Dispatcharr doesn't have them, nothing
-    happens: the result is still in Discord, the log and Status.
+    Dispatcharr knows three outcomes: ok (green), partial (yellow) and error (red). A test
+    that tripped an alert, couldn't update Prometheus, or found another test running is
+    partial; the original outcome stays in "outcome" for the run history's JSON download.
     """
-    try:
-        from datetime import timedelta
-
-        from core.models import NotificationDismissal, SystemNotification  # type: ignore
-        from core.utils import send_websocket_notification  # type: ignore
-        from django.utils import timezone as dj_timezone  # type: ignore
-    except Exception:
-        logger.debug("Packet Slapper: Dispatcharr notifications unavailable", exc_info=True)
-        return False
-    message = str(outcome.get("message") or "")
-    failed = outcome.get("status") == "error"
-    warn = failed or "\u26a0" in message
-    try:
-        notification, _ = SystemNotification.objects.update_or_create(
-            notification_key=_GUI_NOTIFICATION_KEY,
-            defaults={
-                "notification_type": SystemNotification.NotificationType.WARNING if warn else SystemNotification.NotificationType.INFO,
-                "priority": SystemNotification.Priority.HIGH,  # high = shown as a popup, not only in the bell
-                "title": "Packet Slapper: speedtest failed" if failed else "Packet Slapper: speedtest result",
-                "message": message,
-                "action_data": {},
-                "is_active": True,
-                "admin_only": False,
-                "expires_at": dj_timezone.now() + timedelta(hours=_GUI_NOTIFICATION_HOURS),
-            },
-        )
-        NotificationDismissal.objects.filter(notification=notification).delete()  # a new result shows again
-        send_websocket_notification(notification)
-        return True
-    except Exception:
-        logger.debug("Packet Slapper: could not send the result to Dispatcharr's UI", exc_info=True)
-        return False
-    finally:
-        try:
-            from django.db import close_old_connections
-            close_old_connections()
-        except Exception:
-            pass
+    result = dict(outcome)
+    status = outcome.get("status")
+    result["outcome"] = status
+    if status == "error":
+        result["status"] = "error"
+    elif status in ("busy", "publish_error") or outcome.get("alerts"):
+        result["status"] = "partial"
+    else:
+        result["status"] = "ok"
+    return result
 
 
-def _start_background_run(settings, logger):
-    """Run Now without holding Dispatcharr's request: claim the slot here (so a busy answer
-    is honest), then run the test on its own thread and answer straight away."""
-    claimed, client = _begin_run(logger, manual=True)
-    if not claimed:
-        logger.info("Packet Slapper: a speedtest is already running; not starting another")
-        return _BUSY
-    settings = dict(settings)
-
-    def work():
-        try:
-            outcome = _run_claimed(settings, logger, True, None, client)
-        except Exception as exc:
-            logger.exception("Packet Slapper: unhandled error in Run Now")
-            outcome = {"status": "error", "message": f"\u274c Speedtest failed: {exc}"}
-        _notify_gui(logger, outcome)
-
-    threading.Thread(target=work, daemon=True, name="packet-slapper-run-now").start()
-    where = "Discord, the log and Status" if str(settings.get("discord_webhook_url") or "").strip() else "Status and the log"
-    return {"status": "ok", "message": f"Speedtest started. The result pops up here in about 30 seconds, and goes to {where}."}
+def _run_now(settings, logger, progress):
+    """Run speedtest now. Dispatcharr runs this as a background task (the action is async),
+    shows progress while it runs, and pops up the message when it's done."""
+    progress(5, "Starting the speedtest")
+    outcome = _do_one_run(settings, logger, manual=True, progress=progress)
+    progress(100, "Done")
+    return _task_result(outcome)
 
 
 def _load_current_run(logger):
@@ -1642,34 +1699,8 @@ def _publish_state(client, state):
     _redis_set(client, _STATE_KEY, json.dumps(state), _STATE_TTL)
 
 
-def _current_logger():
-    return _logger_holder["logger"] or logging.getLogger("plugins.packet_slapper")
-
-
-def _read_settings_from_db(logger):
-    """Return (plugin_enabled, settings) from Dispatcharr's DB, or None if unavailable."""
-    try:
-        from apps.plugins.models import PluginConfig  # type: ignore
-
-        try:
-            row = PluginConfig.objects.filter(key=_PLUGIN_KEY).values("enabled", "settings").first()
-        finally:
-            try:
-                from django.db import close_old_connections
-
-                close_old_connections()
-            except Exception:
-                pass
-        if row is None:
-            return None
-        return bool(row["enabled"]), (row["settings"] or {})
-    except Exception:
-        logger.debug("Packet Slapper: could not read plugin settings from the DB", exc_info=True)
-        return None
-
-
 def _acquire_leadership(client, leader_id):
-    """True if this watcher holds (or just took) the scheduler lease."""
+    """True if this scheduler holds (or just took) the scheduler lock."""
     if client is None:
         return True  # can't coordinate without Redis; assume a single process
     try:
@@ -1680,21 +1711,15 @@ def _acquire_leadership(client, leader_id):
     return _refresh_if_owner(client, _LEADER_KEY, leader_id, _LEADER_TTL)
 
 
-def _release_leadership(client, logger, ctrl, keep_schedule=False):
-    """Give up the lease.
-
-    keep_schedule=True is a hand-off (plugin reload): the shared schedule stays in Redis
-    so the next watcher resumes it instead of running a test straight away. Otherwise
-    (scheduler turned off in settings) the schedule is cleared.
-    """
-    if not keep_schedule:
-        ctrl.state.clear()
-    if client is not None and _delete_if_owner(client, _LEADER_KEY, ctrl.leader_id) and not keep_schedule:
+def _clear_schedule(client, sched, logger):
+    """The scheduler was turned off in settings: forget the shared schedule."""
+    sched.state.clear()
+    if client is not None and _delete_if_owner(client, _LEADER_KEY, sched.leader_id):
         try:
             client.delete(_STATE_KEY)
         except Exception:
             pass
-    logger.info("Packet Slapper: scheduler handed off" if keep_schedule else "Packet Slapper: scheduler stopped")
+    logger.info("Packet Slapper: scheduler stopped")
 
 
 def _interval_minutes(settings):
@@ -1784,7 +1809,7 @@ def _prev_slot(times, tz, now):
     return past[-1] if past else None
 
 
-def _scheduler_tick_at(ctrl, client, settings, logger, times):
+def _scheduler_tick_at(sched, client, settings, logger, times):
     """One pass of an 'At set times' schedule.
 
     slot_next is the next set time; it only moves on once that time has been handled, so a
@@ -1792,7 +1817,7 @@ def _scheduler_tick_at(ctrl, client, settings, logger, times):
     a catch-up after a restart, or a retry after a skip (every 30 minutes) or a busy slot
     (every minute), never later than the next set time.
     """
-    state = ctrl.state
+    state = sched.state
     tz = _tz(settings)
     now = time.time()
     label = f"{_fmt_run_times(times)}|{getattr(tz, 'key', 'UTC')}"
@@ -1810,7 +1835,7 @@ def _scheduler_tick_at(ctrl, client, settings, logger, times):
         _publish_state(client, state)
         outcome = None
         try:
-            outcome = _do_one_run(settings, logger, manual=False, leader_id=ctrl.leader_id)
+            outcome = _do_one_run(settings, logger, manual=False, leader_id=sched.leader_id)
         except Exception:
             logger.exception("Packet Slapper: unhandled error in scheduled run")
         after = time.time()
@@ -1830,18 +1855,18 @@ def _scheduler_tick_at(ctrl, client, settings, logger, times):
     return True
 
 
-def _scheduler_tick(ctrl, client, settings, logger, holding):
-    """One pass of the schedule. Returns True while this watcher is the active scheduler."""
-    if not _acquire_leadership(client, ctrl.leader_id):
-        return False  # another watcher (this process or another) is running the schedule
+def _scheduler_tick(sched, client, settings, logger, holding):
+    """One pass of the schedule.
 
-    state = ctrl.state
+    holding=False on the first pass after this process became the leader (or after the
+    scheduler was turned back on): it picks up the schedule a previous leader left in Redis.
+    """
+    state = sched.state
     kind, value = _schedule(settings) or ("every", _DEFAULT_INTERVAL_MINUTES)
 
     if not holding:
-        # Just became active: pick up the shared schedule if a previous holder left one.
-        # Without Redis, fall back to what the previous watcher in this process left behind.
-        shared = _redis_get_json(client, _STATE_KEY) or dict(ctrl.inherited) or {}
+        # Just became active: pick up the shared schedule if a previous leader left one.
+        shared = _redis_get_json(client, _STATE_KEY) or {}
         state.clear()
         state.update({
             "started_at": shared.get("started_at") or time.time(),
@@ -1862,7 +1887,7 @@ def _scheduler_tick(ctrl, client, settings, logger, holding):
         logger.info(f"Packet Slapper: scheduler started ({what})")
 
     if kind == "at":
-        return _scheduler_tick_at(ctrl, client, settings, logger, value)
+        return _scheduler_tick_at(sched, client, settings, logger, value)
     for key in ("slot_next", "pending_at", "at_label", "run_at"):
         state.pop(key, None)
     interval_seconds = value * 60
@@ -1877,7 +1902,7 @@ def _scheduler_tick(ctrl, client, settings, logger, holding):
         _publish_state(client, state)
         outcome = None
         try:
-            outcome = _do_one_run(settings, logger, manual=False, leader_id=ctrl.leader_id)
+            outcome = _do_one_run(settings, logger, manual=False, leader_id=sched.leader_id)
         except Exception:
             logger.exception("Packet Slapper: unhandled error in scheduled run")
         run_status = outcome.get("status") if isinstance(outcome, dict) else None
@@ -1893,109 +1918,92 @@ def _scheduler_tick(ctrl, client, settings, logger, holding):
     return True
 
 
-class _Controller:
-    """One scheduler watcher thread with its own stop flag, lease identity and state.
+class _Scheduler:
+    """The schedule, run as this plugin's persistent service.
 
-    Each watcher gets its own stop flag so that stop() followed by a fresh Plugin()
-    (which is what a Dispatcharr plugin discovery pass does) can start a new watcher
-    right away, even while the old one is still finishing a speedtest. The old one
-    exits as soon as its test is done and hands the lease over; the new one then
-    picks up the schedule where it left off.
+    Dispatcharr calls on_leader_acquired in one process and runs serve() on a thread it
+    owns. It sets stop_event when the plugin is disabled, reloaded or updated, when
+    Dispatcharr shuts down, or when this process loses leadership. Another process then
+    becomes the leader and carries on from the schedule kept in Redis.
     """
 
-    def __init__(self, previous=None):
-        self.stop = threading.Event()
-        self.leader_id = f"{_instance_id()}-{uuid.uuid4().hex[:6]}"
+    def __init__(self, get_settings, logger):
+        self.get_settings = get_settings
+        self.logger = logger
         self.state = {}
-        # Only used when Redis is unavailable: the schedule the previous watcher had.
-        self.inherited = dict(previous.state) if previous is not None else {}
-        self.thread = threading.Thread(target=self._loop, daemon=True, name="packet-slapper-scheduler")
+        self.running = False
+        self.leader_id = f"{_instance_id()}-{uuid.uuid4().hex[:6]}"
 
-    def alive(self):
-        return self.thread.is_alive()
+    def _read_settings(self):
+        try:
+            return self.get_settings()
+        except Exception:
+            self.logger.debug("Packet Slapper: could not read the saved settings", exc_info=True)
+            return None
 
-    def _loop(self):
-        logger = _current_logger()
-        logger.info("Packet Slapper: scheduler watcher started")
+    def serve(self, stop_event):
+        logger = self.logger
+        logger.info(f"Packet Slapper: scheduler service started (process {os.getpid()})")
+        self.running = True
         client = None
         holding = False
+        settings = None
         warned = False
-        db_fail_since = None  # a failed settings read only warns if it keeps failing
+        fail_since = None  # a failed settings read only warns if it keeps failing
         prewarmed = False
-        self.stop.wait(_STARTUP_DELAY)
+        standing_by = False
+        stop_event.wait(_STARTUP_DELAY)
         try:
-            while not self.stop.is_set():
-                logger = _current_logger()
+            while not stop_event.is_set():
                 try:
                     if client is None:
                         client = _get_redis_client(logger)
-                    snapshot = _read_settings_from_db(logger)
-                    if snapshot is None:
-                        db_fail_since = db_fail_since or time.time()
-                        # Brief failures are normal while Dispatcharr reloads plugins (every worker
-                        # re-imports them at once); only a lasting one is worth a warning.
-                        if not warned and time.time() - db_fail_since >= _DB_WARN_AFTER_SECONDS:
+                    fresh = self._read_settings()
+                    if fresh is None:
+                        fail_since = fail_since or time.time()
+                        if not warned and time.time() - fail_since >= _DB_WARN_AFTER_SECONDS:
                             logger.warning(
-                                "Packet Slapper: couldn't read this plugin's saved settings from the database for "
-                                f"over {_DB_WARN_AFTER_SECONDS} seconds (not saved yet, or the database is unreachable); "
-                                "using the settings from the last button click instead"
+                                "Packet Slapper: couldn't read this plugin's saved settings for over "
+                                f"{_DB_WARN_AFTER_SECONDS} seconds (is the database reachable?); "
+                                "carrying on with the last settings it read"
                             )
                             warned = True
-                        if not _last_settings:
-                            # No saved settings and no button click to fall back on:
-                            # wait for the DB rather than guess what the user wants.
-                            self.stop.wait(_TICK_SECONDS)
+                        if settings is None:
+                            stop_event.wait(_TICK_SECONDS)  # nothing to go on yet
                             continue
-                        plugin_enabled, settings = True, dict(_last_settings)
                     else:
-                        warned = False  # re-arm the warning in case the DB goes away again
-                        db_fail_since = None
-                        plugin_enabled, settings = snapshot
+                        settings, fail_since, warned = fresh, None, False
 
-                    if plugin_enabled and not prewarmed:
+                    if not prewarmed:
                         prewarmed = True
                         _prewarm_cli(logger, settings)
-                        if self.stop.is_set():
+                        if stop_event.is_set():
                             break
 
-                    if plugin_enabled and _schedule(settings) is not None:
-                        now_holding = _scheduler_tick(self, client, settings, logger, holding)
-                        if holding and not now_holding:
-                            self.state.clear()  # someone else took over the schedule; don't touch its Redis keys
-                            logger.info("Packet Slapper: another process is now running the schedule")
-                        holding = now_holding
-                    elif holding:
-                        _release_leadership(client, logger, self)
-                        holding = False
+                    if _schedule(settings) is None:
+                        if holding:
+                            _clear_schedule(client, self, logger)
+                            holding = False
+                    elif _acquire_leadership(client, self.leader_id):
+                        _scheduler_tick(self, client, settings, logger, holding)
+                        holding = True
+                    elif holding or not standing_by:
+                        # Another scheduler holds the lock: leave the schedule to it.
+                        self.state.clear()
+                        holding, standing_by = False, True
+                        logger.info(f"Packet Slapper: another process runs the schedule; "
+                                    f"standing by (process {os.getpid()})")
                 except Exception:
-                    logger.exception("Packet Slapper: scheduler watcher error")
-                self.stop.wait(_TICK_SECONDS)
+                    logger.exception("Packet Slapper: scheduler error")
+                stop_event.wait(_TICK_SECONDS)
         finally:
-            if holding:
-                # Stopped by stop() (disable, delete or reload). Keep the schedule so a
-                # watcher started by the reload carries on from it instead of testing again
-                # at once; if nothing takes over, the state key simply expires.
-                _release_leadership(client, logger, self, keep_schedule=True)
-            logger.info("Packet Slapper: scheduler watcher stopped")
-
-
-def _ensure_controller():
-    """Start this process's watcher thread if a live, un-stopped one isn't already running."""
-    global _controller
-    with _lock:
-        current = _controller
-        if current is not None and current.alive() and not current.stop.is_set():
-            return
-        # Either there is no watcher, or the current one has been told to stop (it may
-        # still be finishing a speedtest). Don't wait for it: start a fresh one now.
-        _controller = _Controller(previous=current)
-        _controller.thread.start()
-
-
-def _stop_controller():
-    with _lock:
-        if _controller is not None:
-            _controller.stop.set()
+            self.running = False
+            # Hand the lock over but keep the schedule in Redis, so whoever runs it next
+            # carries on from it instead of testing again at once. If nobody does, the state
+            # key just expires.
+            if holding and client is not None:
+                _delete_if_owner(client, _LEADER_KEY, self.leader_id)
+            logger.info(f"Packet Slapper: scheduler service stopped (process {os.getpid()})")
 
 
 def _load_scheduler_state(logger):
@@ -2007,9 +2015,9 @@ def _load_scheduler_state(logger):
             return (json.loads(_s(raw)) if raw else None), True
         except Exception:
             logger.debug("Packet Slapper: could not read scheduler state from Redis", exc_info=True)
-    ctrl = _controller
-    alive = bool(ctrl is not None and ctrl.alive() and not ctrl.stop.is_set() and ctrl.state)
-    return (dict(ctrl.state) if alive else None), False
+    sched = _active_scheduler
+    alive = bool(sched is not None and sched.running and sched.state)
+    return (dict(sched.state) if alive else None), False
 
 
 def _load_last_run(logger):
@@ -2140,6 +2148,12 @@ def _manifest():
 _MANIFEST = _manifest()
 
 
+_OLD_DISPATCHARR = (
+    "Packet Slapper 2.x needs Dispatcharr 0.34.0 or newer. Update Dispatcharr, "
+    "or install Packet Slapper 1.3.0, the last version for older Dispatcharr."
+)
+
+
 class Plugin:
     # Read from plugin.json so the two can't drift apart (the cause of the 1.0.3 fix).
     name = _MANIFEST.get("name", "Packet Slapper")
@@ -2148,21 +2162,56 @@ class Plugin:
 
     fields = []  # defined in plugin.json; kept here only if you drop the manifest
 
-    def __init__(self):
-        _ensure_controller()  # resumes the schedule after a restart if it's enabled
+    # Nothing is started in __init__: Dispatcharr creates this class in every one of its
+    # processes. The scheduler starts in on_leader_acquired, in the one process it picks.
+
+    def get_fields(self, context):
+        """Settings for Dispatcharr's page. The same as plugin.json, except that once
+        'Find servers' has run, 'Speedtest server' becomes a dropdown of what it found.
+
+        Dispatcharr calls this when it loads the plugin (at startup, and on the reload that
+        Find servers asks for), so the choices follow the latest search.
+        """
+        fields = [dict(f) for f in (_MANIFEST.get("fields") or [])]
+        try:
+            servers = _load_server_list(context.get("data_dir"))
+            if not servers:
+                return fields
+            try:
+                saved = _clean_server_id((context.get("settings") or {}).get("server_id"))
+            except RuntimeError:
+                saved = ""
+            return [_server_field(f, servers, saved) if f.get("id") == "server_id" else f for f in fields]
+        except Exception:
+            return fields  # never let a bad cache file hide the settings
+
+    def on_leader_acquired(self, context):
+        """Dispatcharr picked this process to run the schedule (needs persistent_service)."""
+        global _active_scheduler
+        logger = context.get("logger") or logging.getLogger("plugins.packet_slapper")
+        _use_data_dir(context, logger)
+        get_settings = context.get("get_settings") or (lambda: dict(context.get("settings") or {}))
+        sched = _Scheduler(get_settings, logger)
+        _active_scheduler = sched
+        context["start_service"](sched.serve, name="scheduler")
+
+    def on_leader_lost(self, context):
+        """Called after Dispatcharr has stopped the scheduler service in this process."""
+        logger = context.get("logger") or logging.getLogger("plugins.packet_slapper")
+        logger.info("Packet Slapper: this process no longer runs the schedule")
 
     def run(self, action: str, params: dict, context: dict):
         settings = context.get("settings", {}) or {}
         logger = context.get("logger") or logging.getLogger("plugins.packet_slapper")
-
-        _logger_holder["logger"] = logger
-        _set_last_settings(settings)
-        _ensure_controller()
+        if "data_dir" not in context:
+            # Dispatcharr 0.34 added data_dir along with the scheduler service and async
+            # actions this version relies on. Without them the scheduler would never start.
+            return {"status": "error", "message": _OLD_DISPATCHARR}
+        _use_data_dir(context, logger)
 
         if action == "run_now":
-            if _run_now_waits(settings):
-                return _do_one_run(settings, logger, manual=True)
-            return _start_background_run(settings, logger)
+            progress = context.get("report_progress") or (lambda percent, message=None: None)
+            return _run_now(settings, logger, progress)
 
         if action == "scheduler_status":
             return {"status": "ok", "message": _describe_scheduler(settings, logger)}
@@ -2183,13 +2232,3 @@ class Plugin:
             return {"status": "error", "message": "Discord post failed (check the webhook URL; see the Dispatcharr log)"}
 
         return {"status": "error", "message": f"Unknown action: {action}"}
-
-    def stop(self, context: dict):
-        """Called when the plugin is disabled, deleted, or reloaded."""
-        logger = context.get("logger") or logging.getLogger("plugins.packet_slapper")
-        # Only signal the watcher. It releases its own lease when it exits (right away if
-        # idle, or once a speedtest in progress finishes), so the lease and the schedule in
-        # Redis are never pulled out from under a running test.
-        _stop_controller()
-        _set_last_settings({})  # a disabled plugin shouldn't keep a settings fallback
-        logger.info("Packet Slapper: stop() called, scheduler signaled to exit")

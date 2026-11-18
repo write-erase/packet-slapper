@@ -1,9 +1,22 @@
 {
+  "manifest_version": 2,
   "name": "Packet Slapper",
   "version": "1.3.0",
   "description": "Runs scheduled or on-demand Ookla speedtests through Dispatcharr's own network connection, with alerts and optional Discord posts and Prometheus metrics.",
   "author": "write-erase",
+  "min_dispatcharr_version": "0.34.0",
+  "capabilities": [
+    "persistent_service",
+    "background_tasks",
+    "subprocess",
+    "outbound_network"
+  ],
   "fields": [
+    {
+      "id": "sec_schedule",
+      "label": "Schedule",
+      "type": "section"
+    },
     {
       "id": "scheduler_interval",
       "label": "Scheduler",
@@ -59,7 +72,8 @@
           "value": "times",
           "label": "At set times (see 'Run at')"
         }
-      ]
+      ],
+      "section": "sec_schedule"
     },
     {
       "id": "run_at_times",
@@ -67,21 +81,16 @@
       "type": "string",
       "default": "",
       "placeholder": "03:00, 15:00",
-      "help_text": "Used when Scheduler is 'At set times'. 24-hour times in your timezone, separated by commas."
+      "help_text": "Used when Scheduler is 'At set times'. 24-hour times in your timezone, separated by commas.",
+      "section": "sec_schedule"
     },
     {
       "id": "skip_if_streaming",
       "label": "Skip scheduled tests while someone is watching",
       "type": "boolean",
       "default": true,
-      "help_text": "Speedtests use real bandwidth, so a scheduled test waits while anyone is watching live TV, VOD or catch-up, and tries again every 30 minutes. 'Run speedtest now' always runs."
-    },
-    {
-      "id": "run_now_wait",
-      "label": "Run speedtest now: wait for the result",
-      "type": "boolean",
-      "default": false,
-      "help_text": "Off: the test runs in the background and the result pops up when it's done (about 30 seconds). On: the button waits and shows the result in its own popup."
+      "help_text": "Speedtests use real bandwidth, so a scheduled test waits while anyone is watching live TV, VOD or catch-up, and tries again every 30 minutes. 'Run speedtest now' always runs.",
+      "section": "sec_schedule"
     },
     {
       "id": "display_timezone",
@@ -310,7 +319,13 @@
           "value": "Pacific/Auckland",
           "label": "New Zealand - Auckland"
         }
-      ]
+      ],
+      "section": "sec_schedule"
+    },
+    {
+      "id": "sec_discord",
+      "label": "Discord",
+      "type": "section"
     },
     {
       "id": "discord_webhook_url",
@@ -319,7 +334,8 @@
       "input_type": "password",
       "default": "",
       "placeholder": "https://discord.com/api/webhooks/…",
-      "help_text": "Results are posted to this Discord channel. Leave blank to see them only in Dispatcharr."
+      "help_text": "Results are posted to this Discord channel. Leave blank to see them only in Dispatcharr.",
+      "section": "sec_discord"
     },
     {
       "id": "discord_style",
@@ -336,14 +352,8 @@
           "label": "Plain text (classic)"
         }
       ],
-      "help_text": "Only used with a Discord webhook."
-    },
-    {
-      "id": "discord_include_exit_ip",
-      "label": "Include exit IP in Discord posts",
-      "type": "boolean",
-      "default": false,
-      "help_text": "Adds the public IP the test went out through, under ISP. It always shows in Dispatcharr. Leave off if others can read the channel."
+      "help_text": "Only used with a Discord webhook.",
+      "section": "sec_discord"
     },
     {
       "id": "discord_post_mode",
@@ -360,29 +370,22 @@
           "label": "Only alerts and recoveries"
         }
       ],
-      "help_text": "With 'Only alerts and recoveries', Discord gets one post when an alert starts or changes (or a test fails), and one when everything is back to normal."
+      "help_text": "With 'Only alerts and recoveries', Discord gets one post when an alert starts or changes (or a test fails), and one when everything is back to normal.",
+      "section": "sec_discord"
     },
     {
-      "id": "server_id",
-      "label": "Speedtest server ID",
-      "type": "string",
-      "default": "",
-      "placeholder": "Auto-select",
-      "help_text": "Pins tests to one Ookla server so results are comparable from run to run. 'Find servers' lists the nearest IDs. Leave blank to let Ookla pick a server each time."
-    },
-    {
-      "id": "cli_auto_update",
-      "label": "Keep the Speedtest CLI up to date",
-      "type": "boolean",
-      "default": true,
-      "help_text": "Checks Ookla for a newer Speedtest CLI at most once a day and switches to it after a trial start. Turn off to stay on your current version (a missing CLI is still downloaded)."
-    },
-    {
-      "id": "prometheus_enabled",
-      "label": "Publish results for Prometheus",
+      "id": "discord_include_exit_ip",
+      "label": "Include exit IP in Discord posts",
       "type": "boolean",
       "default": false,
-      "help_text": "Saves each result in Redis for the Dispatcharr Exporter plugin to serve as dispatcharr_speedtest_* metrics. Only needed if you scrape Dispatcharr with Prometheus."
+      "help_text": "Adds the public IP the test went out through, under ISP. It always shows in Dispatcharr. Leave off if others can read the channel.",
+      "section": "sec_discord"
+    },
+    {
+      "id": "sec_alerts",
+      "label": "Alerts",
+      "type": "section",
+      "collapsed": true
     },
     {
       "id": "vpn_check",
@@ -403,43 +406,86 @@
           "label": "Off"
         }
       ],
-      "help_text": "Checks that speedtests go through your VPN. Works when Dispatcharr uses a VPN container's network, like Gluetun. On Auto, you get an alert if a test skips the VPN after earlier tests used it. A VPN running on your router can't be detected."
+      "help_text": "Checks that speedtests go through your VPN. Works when Dispatcharr uses a VPN container's network, like Gluetun. On Auto, you get an alert if a test skips the VPN after earlier tests used it. A VPN running on your router can't be detected.",
+      "section": "sec_alerts"
     },
     {
       "id": "alert_min_download_mbps",
       "label": "Alert: download below (Mbps)",
       "type": "number",
       "placeholder": "Off",
-      "help_text": "Leave this and the alerts below blank, or 0, to turn them off."
+      "help_text": "Leave this and the alerts below blank, or 0, to turn them off.",
+      "section": "sec_alerts"
     },
     {
       "id": "alert_min_upload_mbps",
       "label": "Alert: upload below (Mbps)",
       "type": "number",
-      "placeholder": "Off"
+      "placeholder": "Off",
+      "section": "sec_alerts"
     },
     {
       "id": "alert_max_loss_pct",
       "label": "Alert: packet loss above (%)",
       "type": "number",
-      "placeholder": "Off"
+      "placeholder": "Off",
+      "section": "sec_alerts"
     },
     {
       "id": "alert_max_loaded_latency_ms",
       "label": "Alert: loaded ping above (ms)",
       "type": "number",
       "placeholder": "Off",
-      "help_text": "Ping while downloading (bufferbloat). Try about 2× your usual loaded ping."
+      "help_text": "Ping while downloading (bufferbloat). Try about 2× your usual loaded ping.",
+      "section": "sec_alerts"
+    },
+    {
+      "id": "sec_speedtest",
+      "label": "Speedtest server and CLI",
+      "type": "section",
+      "collapsed": true
+    },
+    {
+      "id": "server_id",
+      "label": "Speedtest server ID",
+      "type": "string",
+      "default": "",
+      "placeholder": "Auto-select",
+      "help_text": "Pins tests to one Ookla server so results are comparable from run to run. Click 'Find servers' and this becomes a list of nearby servers to pick from. Leave blank to let Ookla pick a server each time.",
+      "section": "sec_speedtest"
+    },
+    {
+      "id": "cli_auto_update",
+      "label": "Keep the Speedtest CLI up to date",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Checks Ookla for a newer Speedtest CLI at most once a day and switches to it after a trial start. Turn off to stay on your current version (a missing CLI is still downloaded).",
+      "section": "sec_speedtest"
+    },
+    {
+      "id": "sec_prometheus",
+      "label": "Prometheus",
+      "type": "section",
+      "collapsed": true
+    },
+    {
+      "id": "prometheus_enabled",
+      "label": "Publish results for Prometheus",
+      "type": "boolean",
+      "default": false,
+      "help_text": "Saves each result in Redis for the Dispatcharr Exporter plugin to serve as dispatcharr_speedtest_* metrics. Only needed if you scrape Dispatcharr with Prometheus.",
+      "section": "sec_prometheus"
     }
   ],
   "actions": [
     {
       "id": "run_now",
       "label": "Run speedtest now",
-      "description": "Runs a speedtest now. The result pops up here when it's done (about 30 seconds) and goes to Discord (if set up), the log and Status.",
+      "description": "Runs a speedtest now. Progress and the result show here (about 30 seconds). The result also goes to Discord (if set up), the log, Status and this plugin's run history.",
       "button_label": "   Run   ",
       "button_variant": "filled",
-      "button_color": "blue"
+      "button_color": "blue",
+      "async": true
     },
     {
       "id": "test_webhook",
@@ -468,7 +514,7 @@
     {
       "id": "find_servers",
       "label": "Find servers",
-      "description": "Lists the Ookla servers nearest to Dispatcharr's connection, for 'Speedtest server ID'. The nearest three show here; the full list goes to Discord (if set up) and the log. Doesn't run a speedtest.",
+      "description": "Finds the Ookla servers nearest to Dispatcharr's connection and offers them as a list under 'Speedtest server' (the page reloads its settings to show it). The nearest three show here; the full list goes to Discord (if set up) and the log. Doesn't run a speedtest.",
       "button_label": "  Find  ",
       "button_variant": "filled",
       "button_color": "blue"
