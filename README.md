@@ -18,6 +18,7 @@ When you first enable 2.x (or update to it from 1.x), Dispatcharr asks you to ap
 - **Run background tasks:** Run speedtest now runs on Dispatcharr's task queue.
 - **Run host processes:** the Ookla Speedtest CLI.
 - **Access external network services:** downloading the CLI from install.speedtest.net, the speedtest itself, and Discord posts.
+- **Use live proxy internals:** reading Dispatcharr's live, catch-up and VOD viewer counts in Redis, so scheduled tests can skip while someone is watching. Packet Slapper only reads these; it never changes them.
 
 Run it on demand or on a schedule. Click **Run speedtest now** for a one-off test: Dispatcharr shows its progress, and about 30 seconds later the result pops up (yellow if an alert tripped, red if the test failed). It also goes to Discord, the log, Status and the plugin's run history, where each result can be downloaded as JSON. Or turn on the scheduler, either every N minutes or hours, or **At set times** such as `03:00, 15:00`. Scheduled runs skip themselves automatically if anyone's watching live TV, VOD, or catch-up, since a speedtest eats real bandwidth.
 

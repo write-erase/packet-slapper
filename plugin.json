@@ -9,7 +9,8 @@
     "persistent_service",
     "background_tasks",
     "subprocess",
-    "outbound_network"
+    "outbound_network",
+    "proxy_internals"
   ],
   "fields": [
     {
