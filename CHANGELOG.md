@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.0.1
 
 - Declares the `proxy_internals` capability ("Use live proxy internals"). Packet Slapper has always read Dispatcharr's live-proxy viewer keys in Redis to skip scheduled tests while someone is watching; Dispatcharr now lists that among the permissions you approve. Nothing else changes. Updating asks you to approve this one new item.
 
