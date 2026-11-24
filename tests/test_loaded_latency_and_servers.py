@@ -21,7 +21,7 @@ def test_loaded_latency_in_summary_log_and_discord():
 
 def test_popup_has_compact_loaded_latency():
     s = ps._summarize_result(FAKE_RESULT, "UTC")
-    assert "| Jitter 0.71 ms | Loaded 45/120 ms | Host:" in ps._format_popup_message(s)
+    assert "| Jitter 0.71 ms | Loaded 45/120 ms | Bloat C | Host:" in ps._format_popup_message(s)
     only_up = dict(FAKE_RESULT, download={"bandwidth": 1})
     assert "| Loaded \u2b06 120 ms |" in ps._format_popup_message(ps._summarize_result(only_up, "UTC"))
 

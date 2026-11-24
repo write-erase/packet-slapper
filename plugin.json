@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Packet Slapper",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Runs scheduled or on-demand Ookla speedtests through Dispatcharr's own network connection, with alerts and optional Discord posts and Prometheus metrics.",
   "author": "write-erase",
   "min_dispatcharr_version": "0.34.0",
@@ -438,6 +438,44 @@
       "type": "number",
       "placeholder": "Off",
       "help_text": "Ping while downloading (bufferbloat). Try about 2× your usual loaded ping.",
+      "section": "sec_alerts"
+    },
+    {
+      "id": "alert_bufferbloat_worse_than",
+      "label": "Alert: bufferbloat grade worse than",
+      "type": "select",
+      "default": "off",
+      "options": [
+        {
+          "value": "off",
+          "label": "Off"
+        },
+        {
+          "value": "A",
+          "label": "A (alert on B or worse)"
+        },
+        {
+          "value": "B",
+          "label": "B (alert on C or worse)"
+        },
+        {
+          "value": "C",
+          "label": "C (alert on D or F)"
+        },
+        {
+          "value": "D",
+          "label": "D (alert on F only)"
+        }
+      ],
+      "help_text": "The grade is how much ping rises while the line is busy, the usual cause of buffering on fast connections: A+ under 5 ms, A under 30, B under 60, C under 200, D under 400, F above.",
+      "section": "sec_alerts"
+    },
+    {
+      "id": "alert_buffering_per_hour",
+      "label": "Alert: buffering per hour",
+      "type": "number",
+      "placeholder": "Off",
+      "help_text": "Posts to Discord when Dispatcharr logs this many buffering events within an hour, together with the latest speedtest, so you can tell whether your connection was the problem. At most one alert an hour.",
       "section": "sec_alerts"
     },
     {
