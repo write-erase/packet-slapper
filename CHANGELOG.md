@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The "New exit IP" note now also works across a Dispatcharr restart. The last exit IP is kept in the plugin's data folder as well as in Redis, because a new exit IP usually comes with a Gluetun restart, which often restarts Dispatcharr and starts its Redis empty.
+
 ## 2.2.0
 
 - New bufferbloat grade, A+ to F, from how much ping rises while the line is busy (the worse of download and upload): A+ up to 5 ms, A up to 30, B up to 60, C up to 200, D up to 400, F above. It shows in the popup ("Bloat C"), the log, Status ("bloat C") and a new Discord line ("🚦 Bufferbloat: C · ping rises 136 ms under load"), and it's included in the Prometheus result. New "Alert: bufferbloat grade worse than" setting.

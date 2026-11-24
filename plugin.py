@@ -100,6 +100,7 @@ _BUFFERING_CHECK_SECONDS = 60   # how often the scheduler service checks for the
 _BUFFERING_MAX_EVENTS = 1000    # cap on events read per check
 # The exit IP of the last successful test, so a change (a new VPN server) can be pointed out.
 _LAST_EXIT_IP_KEY = "packet_slapper:last_exit_ip"
+_LAST_EXIT_IP_FILE = "last_exit_ip"  # same, in the data folder: survives a Dispatcharr restart
 _LEADER_TTL = 240       # seconds; longer than the slowest speedtest, and renewed during one
 _STATE_TTL = 300
 _RUN_TTL = 240
@@ -783,7 +784,12 @@ def _summarize_result(result, tz_name):
 def _note_exit_change(summary, logger):
     """Remember this test's exit IP; if it differs from the last test's, record the old one
     in summary["exit_ip_was"]. A new exit IP usually means Gluetun or the VPN picked another
-    server, which is the first thing to know when the numbers suddenly change."""
+    server, which is the first thing to know when the numbers suddenly change.
+
+    The last exit IP is kept in Redis and in the plugin's data folder. The file matters: a
+    new exit IP usually comes with a Gluetun restart, which often restarts Dispatcharr too,
+    and Dispatcharr's Redis may start empty after that.
+    """
     new = summary.get("exit_ip")
     if not new:
         return
@@ -794,12 +800,36 @@ def _note_exit_change(summary, logger):
             old = _s(client.get(_LAST_EXIT_IP_KEY))
             client.set(_LAST_EXIT_IP_KEY, new)
         except Exception:
-            client = None
-    if client is None:
-        old = _local_last_exit_ip.get("ip")
+            old = None
+    old = old or _local_last_exit_ip.get("ip") or _read_last_exit_ip()
     _local_last_exit_ip["ip"] = new
+    _write_last_exit_ip(new, logger)
     if old and old != new:
         summary["exit_ip_was"] = old
+
+
+def _last_exit_ip_path():
+    return os.path.join(PLUGIN_DATA_DIR, _LAST_EXIT_IP_FILE)
+
+
+def _read_last_exit_ip():
+    try:
+        with open(_last_exit_ip_path(), encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
+def _write_last_exit_ip(ip, logger):
+    path = _last_exit_ip_path()
+    tmp = f"{path}.new.{os.getpid()}"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(ip)
+        os.replace(tmp, path)
+    except OSError:
+        logger.debug("Packet Slapper: could not save the last exit IP", exc_info=True)
 
 
 def _format_popup_message(s):

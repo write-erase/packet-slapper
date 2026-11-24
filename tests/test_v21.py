@@ -182,3 +182,21 @@ def test_previous_exit_ip_stays_out_of_prometheus(env):
     run_with_ip(e, "198.51.100.7")
     result = json.loads(e.redis.get(e.ps._METRICS_KEY))["result"]
     assert "exit_ip" not in result and "exit_ip_was" not in result
+
+
+def test_exit_ip_change_survives_a_dispatcharr_restart(env):
+    """A new exit IP usually comes with a Gluetun restart, which often restarts Dispatcharr
+    and empties its Redis. The data folder still remembers the last exit IP."""
+    e = env()
+    run_with_ip(e, "95.173.217.202")
+    e.redis.d.clear()                      # Dispatcharr's Redis starts empty
+    e.ps._local_last_exit_ip.clear()       # and so does the new process
+    changed = run_with_ip(e, "159.26.100.17")
+    assert "| New exit IP (was 95.173.217.202)" in changed["message"]
+
+
+def test_exit_ip_memory_without_redis(env):
+    e = env(redis_on=False)
+    run_with_ip(e, "203.0.113.45")
+    e.ps._local_last_exit_ip.clear()
+    assert "New exit IP (was 203.0.113.45)" in run_with_ip(e, "198.51.100.7")["message"]
