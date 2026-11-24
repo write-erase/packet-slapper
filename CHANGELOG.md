@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Scheduled tests now show up in the plugin's run history, marked as scheduled, next to the Run speedtest now ones, with the full result as a JSON download. The scheduler still decides when to test; the test itself runs on Dispatcharr's task queue. If the queue can't be used, the scheduler runs the test itself as before.
+- Scheduled tests also skip while a DVR recording is running or starts within 3 minutes, so a test can't disrupt the start of a recording. Check active streams shows recordings separately ("● 1 recording now or starting soon"), and Status shows "Scheduled test in progress" while one runs.
+- When the exit IP differs from the last test's (usually a new VPN server), the result says so: "New exit IP (was …)" in the popup and the log, and "new exit IP since the last test" in Discord. Discord only shows the old IP if "Include exit IP in Discord posts" is on. It's left out of the Prometheus metrics, like the exit IP itself.
+
 ## 2.0.1
 
 - Declares the `proxy_internals` capability ("Use live proxy internals"). Packet Slapper has always read Dispatcharr's live-proxy viewer keys in Redis to skip scheduled tests while someone is watching; Dispatcharr now lists that among the permissions you approve. Nothing else changes. Updating asks you to approve this one new item.

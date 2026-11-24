@@ -64,6 +64,7 @@ _local_last_skip = {}   # same, for the skip streak
 _local_alert_state = {}  # same, for active alerts
 _local_vpn_seen = {}     # same, for VPN check "Auto"
 _local_current_run = {}  # same, for the test in progress
+_local_last_exit_ip = {}  # same, for the last exit IP
 
 _PROCESS_TOKEN = uuid.uuid4().hex[:8]
 _run_lock = threading.Lock()
@@ -92,6 +93,8 @@ _METRICS_ATTEMPTS = 3
 _ALERT_STATE_KEY = "packet_slapper:alerts"
 # Set once a test has gone through a VPN tunnel: VPN check "Auto" alerts from then on.
 _VPN_SEEN_KEY = "packet_slapper:vpn_seen"
+# The exit IP of the last successful test, so a change (a new VPN server) can be pointed out.
+_LAST_EXIT_IP_KEY = "packet_slapper:last_exit_ip"
 _LEADER_TTL = 240       # seconds; longer than the slowest speedtest, and renewed during one
 _STATE_TTL = 300
 _RUN_TTL = 240
@@ -742,6 +745,28 @@ def _summarize_result(result, tz_name):
     }
 
 
+def _note_exit_change(summary, logger):
+    """Remember this test's exit IP; if it differs from the last test's, record the old one
+    in summary["exit_ip_was"]. A new exit IP usually means Gluetun or the VPN picked another
+    server, which is the first thing to know when the numbers suddenly change."""
+    new = summary.get("exit_ip")
+    if not new:
+        return
+    client = _get_redis_client(logger)
+    old = None
+    if client is not None:
+        try:
+            old = _s(client.get(_LAST_EXIT_IP_KEY))
+            client.set(_LAST_EXIT_IP_KEY, new)
+        except Exception:
+            client = None
+    if client is None:
+        old = _local_last_exit_ip.get("ip")
+    _local_last_exit_ip["ip"] = new
+    if old and old != new:
+        summary["exit_ip_was"] = old
+
+
 def _format_popup_message(s):
     """Short one-line summary for the Dispatcharr notification popup.
 
@@ -766,6 +791,8 @@ def _format_popup_message(s):
         parts.append(f"Host: {s['server_location']}")
     if s.get("exit_ip"):
         parts.append(f"Source: {s['exit_ip']}")  # the public IP the test went out through
+    if s.get("exit_ip_was"):
+        parts.append(f"New exit IP (was {s['exit_ip_was']})")
     return " | ".join(parts)
 
 
@@ -788,7 +815,7 @@ def _format_ui_message(s):
         f"ISP: {s['isp']}",
     ]
     if s.get("exit_ip"):
-        parts.append(f"Exit IP {s['exit_ip']}")
+        parts.append(f"Exit IP {s['exit_ip']}" + (f" (was {s['exit_ip_was']})" if s.get("exit_ip_was") else ""))
     if s["distance"] != "N/A":
         parts.append(s["distance"])
     parts.append(s["time_local"])
@@ -807,7 +834,8 @@ def _format_discord_message(s, include_ip=False):
         "**Packet Slapper speedtest**",
         f"> Server: {s['server_name']} ({s['server_location']}, {s['server_country']})",
         f"> Host: {s['server_host']}",
-        f"> ISP: {s['isp']}" + (f" (`{s['exit_ip']}`)" if include_ip and s.get("exit_ip") else ""),
+        f"> ISP: {s['isp']}" + (f" (`{s['exit_ip']}`)" if include_ip and s.get("exit_ip") else "")
+        + (f" \u2014 {_exit_change_text(s, include_ip)}" if s.get("exit_ip_was") else ""),
         f"> Time: {s['time_display']}",
         f"> Latency: `{s['latency_ms']} ms` (Jitter: {s['jitter_ms']} ms)"
         + (f"\n> Loaded latency: {_fmt_loaded(s)}" if _fmt_loaded(s) else ""),
@@ -859,6 +887,8 @@ def _discord_embed(s, include_ip=False):
     isp = _clip(s["isp"], 200)
     if include_ip and s.get("exit_ip"):
         isp += f" \u00b7 `{_clip(s['exit_ip'], 60)}`"
+    if s.get("exit_ip_was"):
+        isp += f"\n\U0001f504 {_exit_change_text(s, include_ip)}"
     fields.append({"name": "\U0001f310 ISP", "value": isp, "inline": False})
 
     embed = {
@@ -871,6 +901,13 @@ def _discord_embed(s, include_ip=False):
         embed["url"] = s["result_url"]  # the title links to the result page too
         fields.append({"name": "\U0001f517 Result", "value": f"[View on speedtest.net]({s['result_url']})", "inline": False})
     return {"embeds": [embed]}
+
+
+def _exit_change_text(s, include_ip):
+    """'New exit IP since the last test' (with the old IP only if IPs may be posted)."""
+    if include_ip:
+        return f"new exit IP since the last test (was `{_clip(s['exit_ip_was'], 60)}`)"
+    return "new exit IP since the last test"
 
 
 def _discord_include_ip(settings):
@@ -954,6 +991,10 @@ _CATCHUP_PATTERNS = ("timeshift:channel:*:clients",)
 # anyone is actually watching. (vod_session_user:* is only a login mapping that expires
 # 5 minutes after a session starts, whether or not it's still playing.)
 _VOD_PATTERNS = ("vod_persistent_connection:*",)
+# DVR recordings in progress, or starting within this many seconds: a speedtest takes up to
+# a minute, so one that starts just before a recording could disrupt its first moments.
+_RECORDING_LEAD_SECONDS = 180
+_RECORDING_DONE = {"completed", "interrupted", "cancelled", "stopped", "failed"}
 # Open connections per provider profile. Covers every session type, so it acts as a
 # catch-all if a future Dispatcharr version moves the keys above.
 _PROVIDER_COUNTER_PATTERNS = ("profile_connections:*",)
@@ -999,6 +1040,41 @@ def _counter_value(client, key):
         return 0
 
 
+def _active_recordings(logger, now=None):
+    """IDs of DVR recordings in progress or about to start, from Dispatcharr's schedule.
+
+    A recording also shows up as a live viewer (it streams through Dispatcharr's proxy),
+    but only once it has started; this also covers the few minutes before it begins.
+    Returns [] if the schedule can't be read.
+    """
+    try:
+        from datetime import timedelta
+
+        from apps.channels.models import Recording  # type: ignore
+        from django.utils import timezone as dj_timezone  # type: ignore
+    except Exception:
+        return []
+    try:
+        current = now or dj_timezone.now()
+        rows = Recording.objects.filter(
+            start_time__lte=current + timedelta(seconds=_RECORDING_LEAD_SECONDS),
+            end_time__gte=current,
+        ).values("id", "custom_properties")
+        return [
+            row["id"] for row in rows
+            if str((row.get("custom_properties") or {}).get("status") or "").lower() not in _RECORDING_DONE
+        ]
+    except Exception:
+        logger.debug("Packet Slapper: could not read the DVR schedule", exc_info=True)
+        return []
+    finally:
+        try:
+            from django.db import close_old_connections
+            close_old_connections()
+        except Exception:
+            pass
+
+
 def _detect_activity(logger):
     """
     Return {category: {redis_key: count}} for everything that looks like an
@@ -1037,6 +1113,7 @@ def _detect_activity(logger):
             "vod": collect(_VOD_PATTERNS, lambda k: _vod_active_streams(client, k)),
             "catch-up": collect(_CATCHUP_PATTERNS, lambda k: _key_size(client, k)),
             "provider connections": collect(_PROVIDER_COUNTER_PATTERNS, lambda k: _counter_value(client, k)),
+            "recording": {f"recording:{rid}": 1 for rid in _active_recordings(logger)},
         }
     except Exception:
         logger.exception("Packet Slapper: failed reading viewer activity from Redis")
@@ -1044,10 +1121,12 @@ def _detect_activity(logger):
 
 
 def _viewer_count(activity):
-    """Live + VOD + catch-up sessions in a _detect_activity() result (provider counters excluded)."""
+    """Live + VOD + catch-up sessions in a _detect_activity() result (provider counters and
+    recordings excluded: a recording also counts as a live session while it runs)."""
     if not activity:
         return 0
-    return sum(sum(keys.values()) for category, keys in activity.items() if category != "provider connections")
+    return sum(sum(keys.values()) for category, keys in activity.items()
+               if category not in ("provider connections", "recording"))
 
 
 def _any_active_streams(logger):
@@ -1104,6 +1183,7 @@ _CATEGORY_LABELS = {"live": "live", "vod": "VOD", "catch-up": "catch-up"}
 # Marks "someone was watching" notes. Not ⚠, which only ever means an alert. The
 # trailing U+FE0E asks for the plain text symbol rather than an emoji where fonts allow.
 _PLAYING = "\u25b6\ufe0e"
+_RECORDING = "\u25cf"  # ● marks DVR recordings
 
 
 def _describe_active_streams(logger):
@@ -1125,15 +1205,19 @@ def _describe_active_streams(logger):
     if not busy:
         return "\u2713 No active sessions | Scheduled tests would run"
     n = _viewer_count(activity)
+    parts = []
     if n:
         kinds = [
             f"{sum(busy[c].values())} {label}"
             for c, label in _CATEGORY_LABELS.items() if c in busy
         ]
-        what = f"{n} active session{'s' if n != 1 else ''} ({', '.join(kinds)})"
-    else:
-        what = "Provider connections in use"
-    return f"{_PLAYING} {what} | Scheduled tests would be skipped"
+        parts.append(f"{_PLAYING} {n} active session{'s' if n != 1 else ''} ({', '.join(kinds)})")
+    recordings = len(busy.get("recording") or {})
+    if recordings:
+        parts.append(f"{_RECORDING} {recordings} recording{'s' if recordings != 1 else ''} now or starting soon")
+    if not parts:
+        parts.append(f"{_PLAYING} Provider connections in use")
+    return " | ".join(parts) + " | Scheduled tests would be skipped"
 
 
 # ---------------------------------------------------------------------------
@@ -1330,6 +1414,7 @@ def _execute_run(settings, logger, manual=False, progress=None):
         progress(15, "Testing ping, download and upload (about 30 seconds)")
         result = _run_speedtest(logger, server_id, _auto_update(settings))
         summary = _summarize_result(result, tz_name)
+        _note_exit_change(summary, logger)
     except Exception as exc:
         logger.error(f"Packet Slapper: speedtest failed: {exc}", exc_info=not isinstance(exc, RuntimeError))
         previous = _load_alert_state(logger)
@@ -1548,11 +1633,15 @@ def _task_result(outcome):
     return result
 
 
-def _run_now(settings, logger, progress):
+def _run_now(settings, logger, progress, manual=True):
     """Run speedtest now. Dispatcharr runs this as a background task (the action is async),
-    shows progress while it runs, and pops up the message when it's done."""
+    shows progress while it runs, and pops up the message when it's done.
+
+    The scheduler queues the same action for scheduled tests (manual=False), so they show
+    up in the plugin's run history too, marked as scheduled.
+    """
     progress(5, "Starting the speedtest")
-    outcome = _do_one_run(settings, logger, manual=True, progress=progress)
+    outcome = _do_one_run(settings, logger, manual=manual, progress=progress)
     progress(100, "Done")
     return _task_result(outcome)
 
@@ -1657,7 +1746,7 @@ def _publish_metrics(logger, ok, summary=None):
                 state["last_success_timestamp_seconds"] = now
                 # The exit IP stays out of the metrics key: Prometheus data tends to travel
                 # further (Grafana, shared dashboards) than the Dispatcharr UI does.
-                state["result"] = {k: v for k, v in summary.items() if k != "exit_ip"}
+                state["result"] = {k: v for k, v in summary.items() if k not in ("exit_ip", "exit_ip_was")}
             try:
                 payload = json.dumps(state, allow_nan=False)
             except ValueError as exc:  # bad data, retrying can't fix it
@@ -1809,6 +1898,45 @@ def _prev_slot(times, tz, now):
     return past[-1] if past else None
 
 
+def _test_running(client):
+    """True if a speedtest is running in this process or (per Redis) in any other."""
+    if _run_lock.locked():
+        return True
+    if client is not None:
+        try:
+            return bool(client.get(_RUNNING_KEY))
+        except Exception:
+            pass
+    return False
+
+
+def _scheduled_run(sched, client, settings, logger):
+    """Start one scheduled test. Returns "skipped", "busy", "queued", or a finished run's status.
+
+    The scheduler checks whether anyone is watching (or recording) and whether a test is
+    already running, then hands the test to Dispatcharr's task queue as the 'Run speedtest
+    now' action, marked scheduled. That puts every scheduled test in the plugin's run history
+    next to the manual ones. If the queue can't be used, the test runs right here instead.
+    """
+    if settings.get("skip_if_streaming", True) and _any_active_streams(logger):
+        logger.info("Packet Slapper: skipping scheduled run, active streams detected")
+        if settings.get("prometheus_enabled", False):
+            _publish_skip(logger)
+        _record_last_run(logger, {"status": "skipped"}, manual=False)
+        return "skipped"
+    if _test_running(client):
+        logger.info("Packet Slapper: a speedtest is already running; trying again shortly")
+        return "busy"
+    if sched.dispatch is not None:
+        try:
+            sched.dispatch("run_now", {"scheduled": True})
+            return "queued"
+        except Exception as exc:
+            logger.warning(f"Packet Slapper: couldn't queue the scheduled test ({exc}); running it here instead")
+    outcome = _do_one_run(settings, logger, manual=False, leader_id=sched.leader_id)
+    return outcome.get("status") if isinstance(outcome, dict) else None
+
+
 def _scheduler_tick_at(sched, client, settings, logger, times):
     """One pass of an 'At set times' schedule.
 
@@ -1833,14 +1961,13 @@ def _scheduler_tick_at(sched, client, settings, logger, times):
     if next_at <= now:
         state["next_run_at"] = None  # shows "test in progress"
         _publish_state(client, state)
-        outcome = None
+        run_status = None
         try:
-            outcome = _do_one_run(settings, logger, manual=False, leader_id=sched.leader_id)
+            run_status = _scheduled_run(sched, client, settings, logger)
         except Exception:
             logger.exception("Packet Slapper: unhandled error in scheduled run")
         after = time.time()
         state["slot_next"] = _next_slot(times, tz, after)
-        run_status = outcome.get("status") if isinstance(outcome, dict) else None
         if run_status == "busy":
             state["pending_at"] = min(after + _BUSY_RETRY_SECONDS, state["slot_next"])
         elif run_status == "skipped":
@@ -1900,12 +2027,11 @@ def _scheduler_tick(sched, client, settings, logger, holding):
     if not next_at or next_at <= now:
         state["next_run_at"] = None  # shows "test in progress"
         _publish_state(client, state)
-        outcome = None
+        run_status = None
         try:
-            outcome = _do_one_run(settings, logger, manual=False, leader_id=sched.leader_id)
+            run_status = _scheduled_run(sched, client, settings, logger)
         except Exception:
             logger.exception("Packet Slapper: unhandled error in scheduled run")
-        run_status = outcome.get("status") if isinstance(outcome, dict) else None
         if run_status == "busy":
             delay = min(_BUSY_RETRY_SECONDS, interval_seconds)
         elif run_status == "skipped":
@@ -1927,9 +2053,11 @@ class _Scheduler:
     becomes the leader and carries on from the schedule kept in Redis.
     """
 
-    def __init__(self, get_settings, logger):
+    def __init__(self, get_settings, logger, dispatch=None):
         self.get_settings = get_settings
         self.logger = logger
+        # Dispatcharr's dispatch_scheduled_task: queues a scheduled test as a background task.
+        self.dispatch = dispatch
         self.state = {}
         self.running = False
         self.leader_id = f"{_instance_id()}-{uuid.uuid4().hex[:6]}"
@@ -2108,8 +2236,9 @@ def _describe_scheduler(settings, logger):
             parts.append(f"Run at: couldn't read {', '.join(repr(b) for b in bad)} (use 15:00)")
 
     current = _load_current_run(logger)
-    if current and current.get("manual"):
-        parts.append(f"Manual test in progress (started {_short_time(current['at'], settings)})")
+    if current:
+        kind = "Manual" if current.get("manual") else "Scheduled"
+        parts.append(f"{kind} test in progress (started {_short_time(current['at'], settings)})")
 
     last = _load_last_run(logger)
     if last:
@@ -2191,7 +2320,7 @@ class Plugin:
         logger = context.get("logger") or logging.getLogger("plugins.packet_slapper")
         _use_data_dir(context, logger)
         get_settings = context.get("get_settings") or (lambda: dict(context.get("settings") or {}))
-        sched = _Scheduler(get_settings, logger)
+        sched = _Scheduler(get_settings, logger, context.get("dispatch_scheduled_task"))
         _active_scheduler = sched
         context["start_service"](sched.serve, name="scheduler")
 
@@ -2211,7 +2340,8 @@ class Plugin:
 
         if action == "run_now":
             progress = context.get("report_progress") or (lambda percent, message=None: None)
-            return _run_now(settings, logger, progress)
+            scheduled = bool((params or {}).get("scheduled"))  # queued by the scheduler
+            return _run_now(settings, logger, progress, manual=not scheduled)
 
         if action == "scheduler_status":
             return {"status": "ok", "message": _describe_scheduler(settings, logger)}
