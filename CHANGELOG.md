@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.2.1
 
 - The "New exit IP" note now also works across a Dispatcharr restart. The last exit IP is kept in the plugin's data folder as well as in Redis, because a new exit IP usually comes with a Gluetun restart, which often restarts Dispatcharr and starts its Redis empty.
 
