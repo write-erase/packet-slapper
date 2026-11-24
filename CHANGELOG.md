@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.1.0
 
 - Scheduled tests now show up in the plugin's run history, marked as scheduled, next to the Run speedtest now ones, with the full result as a JSON download. The scheduler still decides when to test; the test itself runs on Dispatcharr's task queue. If the queue can't be used, the scheduler runs the test itself as before.
 - Scheduled tests also skip while a DVR recording is running or starts within 3 minutes, so a test can't disrupt the start of a recording. Check active streams shows recordings separately ("● 1 recording now or starting soon"), and Status shows "Scheduled test in progress" while one runs.
