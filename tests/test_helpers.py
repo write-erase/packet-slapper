@@ -98,7 +98,7 @@ def test_discord_payloads_stay_under_limits():
     assert len(embed["description"]) <= 1500
     s = ps._summarize_result(FAKE_RESULT, "UTC")
     assert len(ps._format_discord_message(s)) < 2000
-    assert len(ps._discord_embed(s)["embeds"][0]["fields"]) == 9
+    assert len(ps._discord_embed(s)["embeds"][0]["fields"]) == 10
 
 
 def test_cli_defaults_to_the_1x_location_until_dispatcharr_gives_a_data_dir():
@@ -159,7 +159,7 @@ def test_settings_switch_controls_the_payload():
 def test_popup_is_short_and_log_line_has_everything():
     s = ps._summarize_result(FAKE_RESULT, "UTC")
     popup = ps._format_popup_message(s)
-    assert popup == "⬇ 912.4 Mbps | ⬆ 41.8 Mbps | Ping 9.12 ms | Loss 0% | Jitter 0.71 ms | Loaded 45/120 ms | Host: Chicago, IL | Source: 203.0.113.45"
+    assert popup == "⬇ 912.4 Mbps | ⬆ 41.8 Mbps | Ping 9.12 ms | Loss 0% | Jitter 0.71 ms | Loaded 45/120 ms | Bloat C | Host: Chicago, IL | Source: 203.0.113.45"
     full = ps._format_ui_message(s)
     for part in ("Example, Chicago, IL", "ISP: Example ISP", "12.3 km", s["result_url"]):
         assert part in full and part not in popup
@@ -176,14 +176,16 @@ def test_discord_embed_layout():
     e = ps._discord_embed(s)["embeds"][0]
     names = [f["name"] for f in e["fields"]]
     assert names == ["\u2b07 Download", "\u2b06 Upload", "\u23f1 Ping", "\u3030 Jitter", "\U0001f4e6 Packet loss",
-                     "\u23f3 Loaded ping", "\U0001f4cd Server", "\U0001f310 ISP", "\U0001f517 Result"]
+                     "\u23f3 Loaded ping", "\U0001f6a6 Bufferbloat", "\U0001f4cd Server", "\U0001f310 ISP",
+                     "\U0001f517 Result"]
     inline = [f["inline"] for f in e["fields"]]
-    assert inline == [True] * 6 + [False] * 3  # two rows of three, then full-width lines
+    assert inline == [True] * 6 + [False] * 4  # two rows of three, then full-width lines
+    assert e["fields"][6]["value"] == "**C** \u00b7 ping rises 111 ms under load"
     assert all("\n" not in f["value"] for f in e["fields"][:6])  # one line each, so rows line up
-    server = e["fields"][6]["value"]
+    server = e["fields"][7]["value"]
     assert server == "Example \u00b7 Chicago, IL, United States \u00b7 12.3 km\nspeed.example.net"
     assert "`" not in server  # plain host text wraps cleanly
-    assert e["fields"][8]["value"] == "[View on speedtest.net](https://www.speedtest.net/result/c/8f2e1c4a)"
+    assert e["fields"][9]["value"] == "[View on speedtest.net](https://www.speedtest.net/result/c/8f2e1c4a)"
     assert e["url"] == s["result_url"]
 
 

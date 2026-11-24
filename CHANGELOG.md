@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- New bufferbloat grade, A+ to F, from how much ping rises while the line is busy (the worse of download and upload): A+ up to 5 ms, A up to 30, B up to 60, C up to 200, D up to 400, F above. It shows in the popup ("Bloat C"), the log, Status ("bloat C") and a new Discord line ("🚦 Bufferbloat: C · ping rises 136 ms under load"), and it's included in the Prometheus result. New "Alert: bufferbloat grade worse than" setting.
+- Why is it buffering? Packet Slapper now reads Dispatcharr's own log of buffering events. Status and every result show the buffering in the last hour ("Buffering 3× in the last hour (ESPN 2, CNN 1)"), next to the speed numbers, so you can tell whether buffering lines up with your connection. New "Alert: buffering per hour" setting posts to Discord, with the latest speedtest, when buffering keeps happening, at most once an hour. The buffering count stays out of the Prometheus metrics.
+
 ## 2.1.0
 
 - Scheduled tests now show up in the plugin's run history, marked as scheduled, next to the Run speedtest now ones, with the full result as a JSON download. The scheduler still decides when to test; the test itself runs on Dispatcharr's task queue. If the queue can't be used, the scheduler runs the test itself as before.

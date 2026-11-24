@@ -93,6 +93,11 @@ _METRICS_ATTEMPTS = 3
 _ALERT_STATE_KEY = "packet_slapper:alerts"
 # Set once a test has gone through a VPN tunnel: VPN check "Auto" alerts from then on.
 _VPN_SEEN_KEY = "packet_slapper:vpn_seen"
+# When the last "buffering keeps happening" alert went out, so it posts at most once an hour.
+_BUFFERING_ALERT_KEY = "packet_slapper:buffering_alert"
+_BUFFERING_WINDOW = 3600        # "the last hour"
+_BUFFERING_CHECK_SECONDS = 60   # how often the scheduler service checks for the alert
+_BUFFERING_MAX_EVENTS = 1000    # cap on events read per check
 # The exit IP of the last successful test, so a change (a new VPN server) can be pointed out.
 _LAST_EXIT_IP_KEY = "packet_slapper:last_exit_ip"
 _LEADER_TTL = 240       # seconds; longer than the slowest speedtest, and renewed during one
@@ -672,6 +677,33 @@ def _fmt_loaded(s, sep=" / "):
 
 # Interface names VPN software uses for its tunnel: OpenVPN (tun/tap), WireGuard (wg),
 # PPP-based VPNs, IPsec, and the names some VPN apps give their WireGuard tunnel.
+# Bufferbloat grade: how much ping rises while the line is busy (loaded ping minus idle
+# ping, the worse of download and upload), on the scale common bufferbloat tests use.
+_BLOAT_GRADES = ((5, "A+"), (30, "A"), (60, "B"), (200, "C"), (400, "D"))
+_GRADE_ORDER = ("A+", "A", "B", "C", "D", "F")
+
+
+def _bufferbloat(s):
+    """(grade, extra_ms) from a summary, or (None, None) without loaded ping."""
+    idle = s.get("latency_ms")
+    loaded = [v for v in (s.get("download_latency_ms"), s.get("upload_latency_ms")) if v is not None]
+    if idle is None or not loaded:
+        return None, None
+    extra = max(0.0, max(loaded) - idle)
+    for limit, grade in _BLOAT_GRADES:
+        if extra <= limit:
+            return grade, extra
+    return "F", extra
+
+
+def _fmt_bloat(s):
+    """'C (+136 ms)', or None."""
+    grade, extra = s.get("bufferbloat_grade"), s.get("bufferbloat_ms")
+    if not grade:
+        return None
+    return f"{grade} (+{extra:.0f} ms)"
+
+
 _VPN_INTERFACE_PREFIXES = ("tun", "tap", "wg", "ppp", "ipsec", "vti", "nordlynx", "proton", "mullvad")
 
 
@@ -716,7 +748,7 @@ def _summarize_result(result, tz_name):
     result_url = str((result.get("result") or {}).get("url") or "").strip()
     if not result_url.startswith("https://"):
         result_url = None  # only ever link to a real https result page
-    return {
+    summary = {
         "download_mbps": round(_num((result.get("download") or {}).get("bandwidth")) / 125000, 2),
         "upload_mbps": round(_num((result.get("upload") or {}).get("bandwidth")) / 125000, 2),
         "latency_ms": round(_num(ping.get("latency")), 2),
@@ -743,6 +775,9 @@ def _summarize_result(result, tz_name):
         "interface_name": str(interface.get("name") or "").strip() or None,
         "via_vpn": _is_vpn_interface(interface),
     }
+    summary["bufferbloat_grade"], extra = _bufferbloat(summary)
+    summary["bufferbloat_ms"] = round(extra, 1) if extra is not None else None
+    return summary
 
 
 def _note_exit_change(summary, logger):
@@ -787,12 +822,16 @@ def _format_popup_message(s):
     elif down is not None or up is not None:
         arrow, value = ("\u2b07", down) if down is not None else ("\u2b06", up)
         parts.append(f"Loaded {arrow} {value:.0f} ms")
+    if s.get("bufferbloat_grade"):
+        parts.append(f"Bloat {s['bufferbloat_grade']}")
     if s.get("server_location") and s["server_location"] != "Unknown Location":
         parts.append(f"Host: {s['server_location']}")
     if s.get("exit_ip"):
         parts.append(f"Source: {s['exit_ip']}")  # the public IP the test went out through
     if s.get("exit_ip_was"):
         parts.append(f"New exit IP (was {s['exit_ip_was']})")
+    if s.get("buffering"):
+        parts.append(f"Buffering {s['buffering'].split(' (')[0]}")  # count only: the popup is short
     return " | ".join(parts)
 
 
@@ -809,6 +848,8 @@ def _format_ui_message(s):
     loaded = _fmt_loaded(s)
     if loaded:
         parts.append(f"Loaded ping {loaded}")
+    if _fmt_bloat(s):
+        parts.append(f"Bufferbloat {_fmt_bloat(s)}")
     parts += [
         f"Loss {_fmt_loss(s['packet_loss'])}",
         f"{s['server_name']}, {s['server_location']}",
@@ -818,6 +859,8 @@ def _format_ui_message(s):
         parts.append(f"Exit IP {s['exit_ip']}" + (f" (was {s['exit_ip_was']})" if s.get("exit_ip_was") else ""))
     if s["distance"] != "N/A":
         parts.append(s["distance"])
+    if s.get("buffering"):
+        parts.append(f"Buffering {s['buffering']}")
     parts.append(s["time_local"])
     if s.get("result_url"):
         parts.append(s["result_url"])
@@ -838,13 +881,16 @@ def _format_discord_message(s, include_ip=False):
         + (f" \u2014 {_exit_change_text(s, include_ip)}" if s.get("exit_ip_was") else ""),
         f"> Time: {s['time_display']}",
         f"> Latency: `{s['latency_ms']} ms` (Jitter: {s['jitter_ms']} ms)"
-        + (f"\n> Loaded latency: {_fmt_loaded(s)}" if _fmt_loaded(s) else ""),
+        + (f"\n> Loaded latency: {_fmt_loaded(s)}" if _fmt_loaded(s) else "")
+        + (f"\n> Bufferbloat: {_fmt_bloat(s)}" if _fmt_bloat(s) else ""),
         f"> Download: `{s['download_mbps']} Mbps`",
         f"> Upload: `{s['upload_mbps']} Mbps`",
         f"> Packet Loss: `{_fmt_loss(s['packet_loss'], ' ')}`",
     ]
     if s["distance"] != "N/A":
         lines.append(f"> Distance: {s['distance']}")
+    if s.get("buffering"):
+        lines.append(f"> Buffering: {s['buffering']}")
     if s.get("result_url"):
         lines.append(f"> Result: <{s['result_url']}>")  # <...> stops Discord adding a preview card
     return "\n".join(lines)
@@ -875,6 +921,10 @@ def _discord_embed(s, include_ip=False):
     loaded = _loaded_short(s)
     if loaded:
         fields.append({"name": "\u23f3 Loaded ping", "value": loaded, "inline": True})
+    if s.get("bufferbloat_grade"):
+        fields.append({"name": "\U0001f6a6 Bufferbloat",
+                       "value": f"**{s['bufferbloat_grade']}** \u00b7 ping rises {s['bufferbloat_ms']:.0f} ms under load",
+                       "inline": False})
 
     where = f"{s['server_location']}, {s['server_country']}"
     server = f"{_clip(s['server_name'], 100)} \u00b7 {_clip(where, 120)}"
@@ -890,6 +940,8 @@ def _discord_embed(s, include_ip=False):
     if s.get("exit_ip_was"):
         isp += f"\n\U0001f504 {_exit_change_text(s, include_ip)}"
     fields.append({"name": "\U0001f310 ISP", "value": isp, "inline": False})
+    if s.get("buffering"):
+        fields.append({"name": "\U0001f4fa Buffering", "value": _clip(s["buffering"], 300), "inline": False})
 
     embed = {
         "title": "Packet Slapper speedtest",
@@ -1073,6 +1125,92 @@ def _active_recordings(logger, now=None):
             close_old_connections()
         except Exception:
             pass
+
+
+def _recent_buffering(logger, window=_BUFFERING_WINDOW, now=None):
+    """Buffering Dispatcharr logged in the last `window` seconds, from its own event log
+    (the 'channel_buffering' system events): (total, [(channel, count), ...] most first),
+    or None if the log can't be read.
+
+    Dispatcharr keeps a limited number of recent events (its "max system events" setting),
+    so a busy server may only have the last part of the hour; the counts are a floor.
+    """
+    try:
+        from datetime import timedelta
+
+        from core.models import SystemEvent  # type: ignore
+        from django.utils import timezone as dj_timezone  # type: ignore
+    except Exception:
+        return None
+    try:
+        since = (now or dj_timezone.now()) - timedelta(seconds=window)
+        names = list(
+            SystemEvent.objects.filter(event_type="channel_buffering", timestamp__gte=since)
+            .values_list("channel_name", flat=True)[:_BUFFERING_MAX_EVENTS]
+        )
+    except Exception:
+        logger.debug("Packet Slapper: could not read Dispatcharr's buffering events", exc_info=True)
+        return None
+    finally:
+        try:
+            from django.db import close_old_connections
+            close_old_connections()
+        except Exception:
+            pass
+    counts = {}
+    for name in names:
+        key = str(name or "").strip() or "Unknown channel"
+        counts[key] = counts.get(key, 0) + 1
+    return len(names), sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def _fmt_buffering(total, channels, limit=3):
+    """'3× in the last hour (ESPN 2, CNN 1)'."""
+    top = ", ".join(f"{_clip(name, 30)} {count}" for name, count in channels[:limit])
+    more = f", +{len(channels) - limit} more" if len(channels) > limit else ""
+    return f"{total}\u00d7 in the last hour ({top}{more})"
+
+
+def _check_buffering_alert(settings, logger, client):
+    """If Dispatcharr logged at least 'Alert: buffering per hour' buffering events in the
+    last hour, log it and post to Discord with the latest speedtest, at most once an hour.
+    Returns True if an alert went out."""
+    limit = _threshold(settings, "alert_buffering_per_hour", logger)
+    if limit is None:
+        return False
+    buffering = _recent_buffering(logger)
+    if not buffering or buffering[0] < limit:
+        return False
+    now = time.time()
+    if client is not None:
+        try:
+            if not client.set(_BUFFERING_ALERT_KEY, str(now), nx=True, ex=_BUFFERING_WINDOW):
+                return False  # already alerted within the hour
+        except Exception:
+            return False
+    total, channels = buffering
+    what = _fmt_buffering(total, channels, limit=5)
+    last = _load_last_run(logger) or {}
+    if last.get("at"):
+        age = now - last["at"]
+        test = (f"Last speedtest {_short_time(last['at'], settings)} ({_fmt_duration(age)} ago): "
+                f"{last.get('detail')}")
+        if age > _BUFFERING_WINDOW:
+            test += ". That's over an hour old; Run speedtest now checks the connection as it is now."
+    else:
+        test = "No speedtest yet; Run speedtest now checks the connection."
+    logger.warning(f"Packet Slapper: buffering {what} | {test}")
+    webhook_url = str(settings.get("discord_webhook_url") or "").strip()
+    if _discord_style(settings) == "plain":
+        payload = f"\u26a0 **Buffering in Dispatcharr:** {what}\n{test}"
+    else:
+        payload = {"embeds": [{
+            "title": "\u26a0 Buffering in Dispatcharr",
+            "description": _clip(f"{what}\n\n{test}", 1500),
+            "color": 0xF39C12,
+        }]}
+    _post_to_discord(webhook_url, payload, logger)
+    return True
 
 
 def _detect_activity(logger):
@@ -1317,6 +1455,12 @@ def _evaluate_alerts(summary, settings, logger):
     high("loss", "alert_max_loss_pct", summary.get("packet_loss"), "Loss", "Packet loss", "%")
     high("loaded", "alert_max_loaded_latency_ms", summary.get("download_latency_ms"), "Loaded", "Loaded ping \u2b07", "ms",
          " (bufferbloat, a common cause of buffering)")
+    worst = str(settings.get("alert_bufferbloat_worse_than") or "off").strip().upper()
+    grade = summary.get("bufferbloat_grade")
+    if worst in _GRADE_ORDER and grade in _GRADE_ORDER and _GRADE_ORDER.index(grade) > _GRADE_ORDER.index(worst):
+        alerts["bloat"] = (f"Bloat {grade}",
+                           f"Bufferbloat grade {grade} (+{summary['bufferbloat_ms']:.0f} ms under load) is worse than "
+                           f"your {worst} alert. Smart Queue / SQM on the router usually fixes this.")
     return alerts
 
 
@@ -1430,6 +1574,9 @@ def _execute_run(settings, logger, manual=False, progress=None):
         return {"status": "error", "message": f"\u274c Speedtest failed: {exc}"}
 
     progress(90, "Checking alerts and sending results")
+    buffering = _recent_buffering(logger)
+    if buffering and buffering[0]:
+        summary["buffering"] = _fmt_buffering(*buffering)
     log_line = _format_ui_message(summary)
     if watching_note:
         log_line += f"{watching_note} during this test, so results may be low and playback may have stuttered"
@@ -1673,6 +1820,8 @@ def _record_last_run(logger, outcome, manual):
     if status in ("ok", "publish_error"):
         r = outcome.get("result") or {}
         detail = f"\u2b07 {r.get('download_mbps')} / \u2b06 {r.get('upload_mbps')} Mbps"
+        if r.get("bufferbloat_grade"):
+            detail += f" \u00b7 bloat {r['bufferbloat_grade']}"
         if status == "publish_error":
             detail += " (Prometheus metrics NOT updated)"
     else:
@@ -1746,7 +1895,7 @@ def _publish_metrics(logger, ok, summary=None):
                 state["last_success_timestamp_seconds"] = now
                 # The exit IP stays out of the metrics key: Prometheus data tends to travel
                 # further (Grafana, shared dashboards) than the Dispatcharr UI does.
-                state["result"] = {k: v for k, v in summary.items() if k not in ("exit_ip", "exit_ip_was")}
+                state["result"] = {k: v for k, v in summary.items() if k not in ("exit_ip", "exit_ip_was", "buffering")}
             try:
                 payload = json.dumps(state, allow_nan=False)
             except ValueError as exc:  # bad data, retrying can't fix it
@@ -2080,6 +2229,7 @@ class _Scheduler:
         fail_since = None  # a failed settings read only warns if it keeps failing
         prewarmed = False
         standing_by = False
+        last_buffering_check = 0.0
         stop_event.wait(_STARTUP_DELAY)
         try:
             while not stop_event.is_set():
@@ -2101,6 +2251,10 @@ class _Scheduler:
                             continue
                     else:
                         settings, fail_since, warned = fresh, None, False
+
+                    if time.time() - last_buffering_check >= _BUFFERING_CHECK_SECONDS:
+                        last_buffering_check = time.time()
+                        _check_buffering_alert(settings, logger, client)
 
                     if not prewarmed:
                         prewarmed = True
@@ -2247,6 +2401,10 @@ def _describe_scheduler(settings, logger):
         parts.append(f"Last run {_short_time(last['at'], settings)} ({kind}) {icon} {last.get('detail')}".replace("  ", " "))
     else:
         parts.append("No runs yet")
+
+    buffering = _recent_buffering(logger)
+    if buffering is not None:
+        parts.append(f"Buffering {_fmt_buffering(*buffering)}" if buffering[0] else "No buffering in the last hour")
 
     alert_state = _load_alert_state(logger)
     if alert_state.get("alerts"):
