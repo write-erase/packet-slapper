@@ -183,8 +183,12 @@ class Env:
             raise self.settings_error
         return dict(self.settings)
 
-    def start_leader(self, plugin=None):
-        """Make this 'process' the leader: on_leader_acquired starts the scheduler service."""
+    def start_leader(self, plugin=None, dispatch=None):
+        """Make this 'process' the leader: on_leader_acquired starts the scheduler service.
+
+        dispatch stands in for Dispatcharr's dispatch_scheduled_task; without it the scheduler
+        runs tests itself, as it does when the task queue can't be used.
+        """
         plugin = plugin or self.ps.Plugin()
 
         def start_service(target, name=None):
@@ -196,6 +200,7 @@ class Env:
         plugin.on_leader_acquired({
             "settings": dict(self.settings), "get_settings": self.get_settings, "logger": self.logger,
             "data_dir": self.data_dir, "start_service": start_service,
+            "dispatch_scheduled_task": dispatch,
         })
         return plugin
 
